@@ -82,4 +82,8 @@ Dependabot opens weekly pull requests for upgrades, and CI decides whether they
 are safe. The GPU stack (torch, transformers, trl, datasets, peft, accelerate) is
 capped by Unsloth, so minor upgrades of those are done by hand, together.
 
+The Space installs Gradio from `sdk_version` in `app/README.md`, which Dependabot
+cannot see. CI audits that version for known vulnerabilities; to upgrade it, change
+`sdk_version` and the version in `tests/test_deploy_space.py` together.
+
 To update the pre-commit hooks: `pre-commit autoupdate`.

@@ -8,6 +8,7 @@ reasons a fine-tuned model looks worse in production than in evaluation.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import random
@@ -76,20 +77,31 @@ def write_json(path: str | os.PathLike, obj: Any) -> None:
 
 
 def set_seed(seed: int) -> None:
-    """Make runs repeatable: same seed, same data order, same LoRA init."""
+    """Make runs repeatable: same seed, same data order, same LoRA init.
+
+    numpy and torch are seeded only when they are installed (the unit tests run without torch).
+    """
     random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
-    try:
+    if importlib.util.find_spec("numpy") is not None:
         import numpy as np
 
         np.random.seed(seed)
-    except ImportError:
-        pass
-    try:
+    if importlib.util.find_spec("torch") is not None:
         import torch
 
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
-    except ImportError:
-        pass
+
+
+def use_one_gpu() -> None:
+    """Show only the first GPU to this process, unless a distributed launcher is in charge.
+
+    Kaggle's "GPU T4 x2" has two GPUs. Without a launcher such as torchrun, the
+    Hugging Face Trainer would spread one process over both with DataParallel,
+    which TRL's SFTTrainer refuses. One T4 is all a 4B QLoRA run needs. Call this
+    before torch is imported: CUDA reads the variable when it starts.
+    """
+    if "WORLD_SIZE" not in os.environ and "LOCAL_RANK" not in os.environ:
+        os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")

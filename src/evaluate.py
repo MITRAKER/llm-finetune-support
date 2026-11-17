@@ -5,7 +5,7 @@ Usage:
     python src/evaluate.py --config configs/qwen3_4b_qlora.yaml --model base
     # Step 4: the fine-tuned model (base + LoRA adapter)
     python src/evaluate.py --config configs/qwen3_4b_qlora.yaml --model tuned
-    # Compare the two and check the quality gates (exit code 2 = retrain)
+    # Compare the two and check the quality gates (exit code 3 = retrain)
     python src/evaluate.py --config configs/qwen3_4b_qlora.yaml --compare
 
 Each evaluation writes results/<name>_predictions.jsonl (every prompt, reply and
@@ -15,6 +15,7 @@ score, for error analysis) and results/<name>_metrics.json (the averages).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from dataclasses import dataclass
@@ -25,7 +26,9 @@ import judge as judge_mod
 import metrics
 from common import build_prompt_messages, load_config, read_jsonl, set_seed, write_json, write_jsonl
 
-EXIT_GATES_FAILED = 2
+# Not 2: Python's argparse exits with 2 on a usage error, and "retrain the model"
+# must not look like a mistyped command to a script or CI job that reads the code.
+EXIT_GATES_FAILED = 3
 
 
 # ---------------------------------------------------------------------------
@@ -143,13 +146,10 @@ def generate_replies(
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
-def build_classifier(data_dir: str | Path) -> tuple[metrics.IntentClassifier, float]:
-    """Train the intent classifier on training ANSWERS; report its accuracy on test references."""
+def build_classifier(data_dir: str | Path) -> metrics.IntentClassifier:
+    """Train the intent classifier on the training split's ANSWERS (it never sees test data)."""
     train_rows = read_jsonl(Path(data_dir) / "train.jsonl")
-    clf = metrics.IntentClassifier().fit([reference_text(r) for r in train_rows], [r["intent"] for r in train_rows])
-    test_rows = read_jsonl(Path(data_dir) / "test.jsonl")
-    ceiling = clf.accuracy([reference_text(r) for r in test_rows], [r["intent"] for r in test_rows])
-    return clf, round(ceiling, 4)
+    return metrics.IntentClassifier().fit([reference_text(r) for r in train_rows], [r["intent"] for r in train_rows])
 
 
 @dataclass
@@ -160,6 +160,21 @@ class Generated:
     replies: list[str]
     oos: list[dict[str, Any]]  # out-of-scope prompts
     oos_replies: list[str]
+
+
+@dataclass
+class Scored:
+    """The automatic scores of one run: the summary report plus the details of every reply."""
+
+    report: dict[str, Any]
+    rows: list[dict[str, Any]]  # one per in-domain reply
+    oos_details: list[dict[str, list[str]]]  # invented details in each out-of-scope reply
+
+
+def sample_fingerprint(gen: Generated) -> str:
+    """A short hash of which prompts were evaluated, so that compare() only compares like with like."""
+    ids = [str(e["id"]) for e in gen.examples] + [str(o["id"]) for o in gen.oos]
+    return hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()[:16]
 
 
 def run_judge(cfg: dict[str, Any], gen: Generated) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -198,35 +213,29 @@ def generate_all(cfg: dict[str, Any], which: str, backend: str, adapter_dir: str
     return Generated(examples, replies[: len(examples)], oos, replies[len(examples) :])
 
 
-def score(cfg: dict[str, Any], which: str, gen: Generated, use_judge: bool) -> tuple[dict[str, Any], list[dict]]:
-    """Automatic metrics (+ the optional judge). Returns the report and one row per prediction."""
-    clf, ceiling = build_classifier(cfg["data"]["out_dir"])
-    summary, rows = metrics.summarize(
-        gen.replies,
-        [reference_text(e) for e in gen.examples],
-        [user_text(e) for e in gen.examples],
-        [e["intent"] for e in gen.examples],
-        clf,
-    )
+def score(cfg: dict[str, Any], which: str, gen: Generated) -> Scored:
+    """Automatic metrics for the in-domain replies and the out-of-scope replies."""
+    clf = build_classifier(cfg["data"]["out_dir"])
+    references = [reference_text(e) for e in gen.examples]
+    intents = [e["intent"] for e in gen.examples]
+    summary, rows = metrics.summarize(gen.replies, references, [user_text(e) for e in gen.examples], intents, clf)
     oos_details = [metrics.invented_details(r, o["prompt"]) for o, r in zip(gen.oos, gen.oos_replies, strict=True)]
     report: dict[str, Any] = {
         "model": which,
+        "sample_fingerprint": sample_fingerprint(gen),
         "metrics": summary.as_dict(),
-        "intent_classifier_ceiling": ceiling,
+        # How often the classifier recognises the intent of the reference answers of the same
+        # examples: a reference point for intent accuracy, not a hard ceiling.
+        "intent_classifier_reference_accuracy": round(clf.accuracy(references, intents), 4),
         "out_of_scope": {
             "n": len(gen.oos),
             "invented_detail_rate": round(sum(bool(d) for d in oos_details) / max(len(gen.oos), 1), 4),
         },
     }
-    judge_rows: list[dict[str, Any]] = []
-    if use_judge:
-        report["judge"], judge_rows = run_judge(cfg, gen)
-    return report, prediction_rows(gen, rows, oos_details, judge_rows)
+    return Scored(report, rows, oos_details)
 
 
-def prediction_rows(
-    gen: Generated, rows: list[dict[str, Any]], oos_details: list[dict[str, list[str]]], judge_rows: list[dict]
-) -> list[dict[str, Any]]:
+def prediction_rows(gen: Generated, scored: Scored, judge_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One JSON row per reply, for error analysis: what was asked, what the model said, how it scored."""
     verdicts = {j["id"]: j for j in judge_rows}
     preds = [
@@ -239,7 +248,7 @@ def prediction_rows(
             **row,
             "judge": verdicts.get(ex["id"]),
         }
-        for ex, rep, row in zip(gen.examples, gen.replies, rows, strict=True)
+        for ex, rep, row in zip(gen.examples, gen.replies, scored.rows, strict=True)
     ]
     preds += [
         {
@@ -251,7 +260,7 @@ def prediction_rows(
             "invented_details": details,
             "judge": verdicts.get(o["id"]),
         }
-        for o, rep, details in zip(gen.oos, gen.oos_replies, oos_details, strict=True)
+        for o, rep, details in zip(gen.oos, gen.oos_replies, scored.oos_details, strict=True)
     ]
     return preds
 
@@ -262,12 +271,21 @@ def evaluate_model(
     """Generate, score and save one model's results."""
     set_seed(cfg["seed"])
     gen = generate_all(cfg, which, backend, adapter_dir)
-    report, preds = score(cfg, which, gen, use_judge)
+    scored = score(cfg, which, gen)
+    # Save before the optional judge runs: generation is the slow GPU part, so a judge
+    # problem (network, quota, an unexpected error) must never cost us the replies.
+    save_results(cfg, which, scored.report, prediction_rows(gen, scored, []))
+    if use_judge:
+        scored.report["judge"], judge_rows = run_judge(cfg, gen)
+        save_results(cfg, which, scored.report, prediction_rows(gen, scored, judge_rows))
+    print(json.dumps(scored.report, indent=2))
+    return scored.report
+
+
+def save_results(cfg: dict[str, Any], which: str, report: dict[str, Any], preds: list[dict[str, Any]]) -> None:
     out = Path(cfg["eval"]["results_dir"])
     write_jsonl(out / f"{which}_predictions.jsonl", preds)
     write_json(out / f"{which}_metrics.json", report)
-    print(json.dumps(report, indent=2))
-    return report
 
 
 # ---------------------------------------------------------------------------
@@ -286,44 +304,94 @@ def check_gates(base: dict[str, Any], tuned: dict[str, Any], gates: dict[str, fl
         failures.append(f"invented detail rate {t['invented_detail_rate']:.3f} > {gates['max_invented_detail_rate']}")
     if t["rouge_l"] - b["rouge_l"] < gates["min_rouge_l_gain"]:
         failures.append(f"ROUGE-L gain {t['rouge_l'] - b['rouge_l']:+.3f} < {gates['min_rouge_l_gain']}")
+    return failures + out_of_scope_failures(base, tuned, gates)
+
+
+def out_of_scope_failures(base: dict[str, Any], tuned: dict[str, Any], gates: dict[str, float]) -> list[str]:
+    """Fine-tuning must not make the model worse on the out-of-scope prompts than the base model.
+
+    The training data has no off-topic or adversarial requests, so this is the
+    regression to watch for: the in-domain gates cannot see it.
+    """
+    failures = []
+    b_rate = base["out_of_scope"]["invented_detail_rate"]
+    t_rate = tuned["out_of_scope"]["invented_detail_rate"]
+    if t_rate - b_rate > gates["max_oos_invented_detail_increase"]:
+        failures.append(
+            f"out-of-scope invented detail rate {t_rate:.3f} vs {b_rate:.3f} for the base model "
+            f"(allowed increase {gates['max_oos_invented_detail_increase']})"
+        )
+    b_ok = judge_score(base, "out_of_scope", "judge_acceptable_rate")
+    t_ok = judge_score(tuned, "out_of_scope", "judge_acceptable_rate")
+    if b_ok is not None and t_ok is not None and b_ok - t_ok > gates["max_oos_judge_acceptable_drop"]:
+        failures.append(
+            f"out-of-scope replies the judge accepts {t_ok:.3f} vs {b_ok:.3f} for the base model "
+            f"(allowed drop {gates['max_oos_judge_acceptable_drop']})"
+        )
     return failures
+
+
+def judge_score(report: dict[str, Any], part: str, key: str) -> float | None:
+    """One LLM-judge score from a metrics report, or None when the judge did not run."""
+    value = report.get("judge", {}).get(part, {}).get(key)
+    return None if value is None else float(value)
+
+
+# (label, section of the metrics report, key), in the order the report shows them.
+TABLE_ROWS = (
+    ("Intent accuracy (higher is better)", "metrics", "intent_accuracy"),
+    ("ROUGE-L (higher is better)", "metrics", "rouge_l"),
+    ("Invented-detail rate (lower is better)", "metrics", "invented_detail_rate"),
+    ("Uses placeholders", "metrics", "placeholder_rate"),
+    ("Average words", "metrics", "avg_words"),
+    ("Out-of-scope prompts: invented-detail rate (lower is better)", "out_of_scope", "invented_detail_rate"),
+)
+JUDGE_TABLE_ROWS = (
+    ("Judge correctness (LLM judge)", "in_domain", "judge_correctness"),
+    ("Judge helpfulness (LLM judge)", "in_domain", "judge_helpfulness"),
+    ("Judge tone (LLM judge)", "in_domain", "judge_tone"),
+    ("Judge acceptable rate (LLM judge)", "in_domain", "judge_acceptable_rate"),
+    ("Out-of-scope prompts: acceptable rate (LLM judge)", "out_of_scope", "judge_acceptable_rate"),
+)
 
 
 def comparison_table(base: dict[str, Any], tuned: dict[str, Any]) -> str:
     """Markdown table for the README and the model card."""
-    rows = [
-        ("Intent accuracy (higher is better)", "intent_accuracy"),
-        ("ROUGE-L (higher is better)", "rouge_l"),
-        ("Invented-detail rate (lower is better)", "invented_detail_rate"),
-        ("Uses placeholders", "placeholder_rate"),
-        ("Average words", "avg_words"),
-    ]
     lines = ["| Metric | Base model | Fine-tuned | Change |", "|---|---|---|---|"]
-    for label, key in rows:
-        b, t = base["metrics"][key], tuned["metrics"][key]
+    for label, section, key in TABLE_ROWS:
+        b, t = base[section][key], tuned[section][key]
         lines.append(f"| {label} | {b:.3f} | {t:.3f} | {t - b:+.3f} |")
-    for key in ("judge_correctness", "judge_helpfulness", "judge_tone", "judge_acceptable_rate"):
-        b_j = base.get("judge", {}).get("in_domain", {}).get(key)
-        t_j = tuned.get("judge", {}).get("in_domain", {}).get(key)
+    for label, part, key in JUDGE_TABLE_ROWS:
+        b_j, t_j = judge_score(base, part, key), judge_score(tuned, part, key)
         if b_j is not None and t_j is not None:
-            lines.append(
-                f"| {key.replace('_', ' ').capitalize()} (LLM judge) | {b_j:.3f} | {t_j:.3f} | {t_j - b_j:+.3f} |"
-            )
+            lines.append(f"| {label} | {b_j:.3f} | {t_j:.3f} | {t_j - b_j:+.3f} |")
     return "\n".join(lines)
 
 
+def check_comparable(base: dict[str, Any], tuned: dict[str, Any]) -> None:
+    """Refuse to compare runs that scored different prompts: the gains would mean nothing."""
+    if base.get("sample_fingerprint") != tuned.get("sample_fingerprint"):
+        raise ValueError(
+            "The base and tuned results were scored on different prompts "
+            f"(base: {base['metrics']['n']} test examples, tuned: {tuned['metrics']['n']}). "
+            "Evaluate both models with the same data and the same eval.n_samples, then compare again."
+        )
+
+
 def compare(cfg: dict[str, Any]) -> int:
-    """Write results/REPORT.md and return the process exit code (0 pass, 2 retrain)."""
+    """Write results/REPORT.md and return the process exit code (0 pass, 3 retrain)."""
     out = Path(cfg["eval"]["results_dir"])
     base = json.loads((out / "base_metrics.json").read_text(encoding="utf-8"))
     tuned = json.loads((out / "tuned_metrics.json").read_text(encoding="utf-8"))
+    check_comparable(base, tuned)
     failures = check_gates(base, tuned, cfg["eval"]["gates"])
     verdict = "PASS: ready to export" if not failures else "FAIL: retrain needed"
     lines = [
         "# Evaluation report",
         "",
-        f"Test examples: {tuned['metrics']['n']}. Intent-classifier ceiling (accuracy on the reference answers): "
-        f"{tuned['intent_classifier_ceiling']:.3f}.",
+        f"Test examples: {tuned['metrics']['n']}, plus {tuned['out_of_scope']['n']} out-of-scope prompts. "
+        "On the reference answers of the same examples, the intent classifier is right "
+        f"{tuned['intent_classifier_reference_accuracy']:.3f} of the time (a reference point for intent accuracy).",
         "",
         comparison_table(base, tuned),
         "",

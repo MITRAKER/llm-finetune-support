@@ -106,6 +106,33 @@ def test_judge_one_records_api_errors():
     assert result.error.startswith("APIConnectionError")
 
 
+class CutOffMessages(FakeMessages):
+    """The SDK raises pydantic's ValidationError when the reply is not complete JSON
+    (a refusal partway through, or max_tokens reached): we raise the same error."""
+
+    def parse(self, **kwargs: Any) -> SimpleNamespace:
+        if "BAD" in kwargs["messages"][0]["content"]:
+            judge.JudgeVerdict.model_validate_json('{"reason": "The reply')
+        return super().parse(**kwargs)
+
+
+def test_judge_one_records_an_incomplete_verdict_instead_of_raising():
+    pytest.importorskip("anthropic")
+    result = judge.judge_one(fake_client(CutOffMessages()), item(reply="BAD"), "claude-opus-5-5", "low")
+    assert result.verdict is None
+    assert (result.error or "").startswith("ValidationError")
+    assert len(result.error or "") <= len("ValidationError: ") + judge.MAX_ERROR_CHARS
+
+
+def test_one_bad_item_does_not_lose_the_other_verdicts():
+    pytest.importorskip("anthropic")
+    items = [item(item_id=f"t-{i}", reply="BAD" if i == 2 else "ok") for i in range(5)]
+    results, summary = judge.judge_all(items, "claude-opus-5-5", client=fake_client(CutOffMessages()), max_workers=2)
+    assert [r.verdict is None for r in results] == [False, False, True, False, False]
+    assert summary.n_errors == 1
+    assert summary.scores["judge_correctness"] == 4
+
+
 def test_judge_all_and_summary_with_cost_estimate():
     items = [item(item_id=f"t-{i}") for i in range(5)]
     results, summary = judge.judge_all(items, "claude-opus-5-5", client=fake_client(FakeMessages()), max_workers=3)

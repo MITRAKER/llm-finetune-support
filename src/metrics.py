@@ -32,40 +32,79 @@ def strip_reasoning(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Invented details ("hallucinated specifics")
 # ---------------------------------------------------------------------------
-# A support bot must not make up order numbers, phone numbers, emails, URLs or
-# amounts. The dataset teaches it to write placeholders such as {{Order Number}}
-# instead. These patterns flag concrete details that did not come from the
-# customer's own message.
+# A support bot must not make up order numbers, phone numbers, emails, URLs,
+# amounts or codes. The dataset teaches it to write placeholders such as
+# {{Order Number}} instead. These patterns flag concrete details in a reply;
+# details the customer wrote in their own message may be repeated.
 DETAIL_PATTERNS: dict[str, re.Pattern[str]] = {
     "email": re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b"),
-    "url": re.compile(r"\b(?:https?://|www\.)\S+|\b[\w-]+\.(?:com|net|org|io|co|shop|store)\b", re.IGNORECASE),
-    # Phone numbers are digit groups split by spaces, dots or dashes:
-    # 1-800-555-0199, +44 20 7946 0958, (555) 123-4567.
-    "phone": re.compile(r"(?<![\w])(?:\+?\d{1,3}[\s.-]+)?(?:\(?\d{2,4}\)?[\s.-]+){2,}\d{3,4}(?![\w])"),
+    "url": re.compile(
+        r"\b(?:https?://|www\.)\S+"
+        r"|\b[\w-]+\.(?:com|net|org|io|co|shop|store|info|biz|us|uk|ca|au|de|fr|eu|app)\b",
+        re.IGNORECASE,
+    ),
+    # Phone numbers: 1-800-555-0199, +44 20 7946 0958, (555) 123-4567, (555)123-4567,
+    # +1 555 0100 and 555-1234. Dates are masked first, so 12.05.2024 is not a phone number.
+    "phone": re.compile(
+        r"(?<![\w])(?:\+?\d{1,3}[\s.-]+)?(?:\(?\d{2,4}\)?[\s.-]+){2,}\d{3,4}(?![\w])"
+        r"|(?<![\w])\+\d{1,3}(?:[\s.-]\d{2,4}){2,}(?![\w])"
+        r"|\(\d{3}\)\d{3}[\s.-]?\d{4}(?![\w])"
+        r"|(?<![\w.-])\d{3}[.-]\d{4}(?![\w-]|\.\d)"
+    ),
     # Order / tracking numbers: 5+ digits in a row, optionally after "#".
     "long_number": re.compile(r"(?<![\w])#?\d{5,}(?![\w])"),
+    # Codes that mix capital letters and digits, such as the discount code SAVE100 or the
+    # tracking number 1Z999AA10123456784. Case-sensitive on purpose: ordinary words never match.
+    "code": re.compile(r"\b(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{6,}\b"),
     "money": re.compile(
         r"[$€£]\s?\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s?(?:USD|EUR|GBP|dollars|euros)\b", re.IGNORECASE
     ),
 }
+# Dates such as 12.05.2024, 12/05/24 or 2024-05-12 look like digit groups but are not invented details.
+DATE_RE = re.compile(r"(?<![\w.-])(?:\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2})(?![\w-]|\.\d)")
+NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 
 def _without_placeholders(text: str) -> str:
     return PLACEHOLDER_RE.sub(" ", text)
 
 
-def _canon(item: str) -> str:
-    return re.sub(r"[^a-z0-9@.]", "", item.lower())
+def _searchable(text: str) -> str:
+    """The text the patterns run on: placeholders and dates removed."""
+    return DATE_RE.sub(" ", _without_placeholders(text))
+
+
+def _canon(kind: str, item: str) -> str:
+    """A normal form, so that "$1,000" in a reply equals "1000" in the customer's message."""
+    if kind in ("phone", "long_number"):
+        return re.sub(r"\D", "", item)
+    if kind == "money":
+        number = NUMBER_RE.search(item)
+        return f"{float(number.group(0).replace(',', '')):.2f}" if number else ""
+    if kind == "url":
+        return re.sub(r"^(?:https?://)?(?:www\.)?", "", item.lower()).rstrip("/.")
+    return item.lower()
+
+
+def _given_details(user_message: str) -> set[str]:
+    """Normal forms of the details the customer wrote. Matching is exact, never by substring:
+    the customer's order 88231 does not excuse an invented refund of $88."""
+    text = _searchable(user_message)
+    given = {_canon(kind, m.group(0)) for kind, pattern in DETAIL_PATTERNS.items() for m in pattern.finditer(text)}
+    for number in NUMBER_RE.findall(text):
+        given.update((_canon("long_number", number), _canon("money", number)))
+    given.update(re.findall(r"[\w@.+-]+", text.lower()))
+    return given
 
 
 def invented_details(response: str, user_message: str = "") -> dict[str, list[str]]:
     """Concrete details in the response that the customer did not provide."""
-    response_text = _without_placeholders(response)
-    given = _canon(user_message)
+    text = _searchable(response)
+    given = _given_details(user_message)
     found: dict[str, list[str]] = {}
     for kind, pattern in DETAIL_PATTERNS.items():
-        hits = [m.group(0).strip() for m in pattern.finditer(response_text)]
-        hits = [h for h in hits if _canon(h) and _canon(h) not in given]
+        hits = [m.group(0).strip() for m in pattern.finditer(text)]
+        hits = [h for h in hits if _canon(kind, h) and _canon(kind, h) not in given]
         if hits:
             found[kind] = hits
     return found

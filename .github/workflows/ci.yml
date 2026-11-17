@@ -106,3 +106,9 @@ jobs:
         # cache folder). The app never uses llama-cpp-python's disk cache, so it is not
         # exposed. See SECURITY.md; remove the exception once a fix is released.
         run: pip-audit --progress-spinner off --no-deps -r app/requirements.txt --ignore-vuln PYSEC-2026-2447
+      - name: Audit the Gradio version the Space runs
+        # The Space installs Gradio from sdk_version in app/README.md, not from a requirements
+        # file, so Dependabot cannot see it: audit it here, and bump it by hand.
+        run: |
+          printf 'gradio==%s\n' "$(sed -n 's/^sdk_version: //p' app/README.md)" > "$RUNNER_TEMP/space-sdk.txt"
+          pip-audit --progress-spinner off --no-deps -r "$RUNNER_TEMP/space-sdk.txt"

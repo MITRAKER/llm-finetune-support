@@ -22,10 +22,11 @@ from dataclasses import dataclass, field
 from statistics import mean
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 SCORE_FIELDS = ("correctness", "helpfulness", "tone")
 MAX_WORKERS_LIMIT = 32  # hard upper bound on parallel requests
+MAX_ERROR_CHARS = 300  # keep error messages short in the results files
 # USD per million tokens (input, output), used only to print an estimate.
 PRICES = {
     "claude-opus-5-5": (4.00, 20.00),
@@ -131,8 +132,11 @@ def judge_one(client: Any, item: JudgeItem, model: str, effort: str) -> JudgeRes
             output_format=JudgeVerdict,
             **_request_kwargs(model, effort),
         )
-    except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
-        return JudgeResult(item.item_id, None, error=f"{type(exc).__name__}: {exc}")
+    except (anthropic.AnthropicError, ValidationError) as exc:
+        # AnthropicError: API and network errors that survived the SDK's retries.
+        # ValidationError: the reply was not a complete verdict, for example a refusal or a
+        # reply cut off by max_tokens partway through the JSON.
+        return JudgeResult(item.item_id, None, error=f"{type(exc).__name__}: {str(exc)[:MAX_ERROR_CHARS]}")
     usage = (response.usage.input_tokens, response.usage.output_tokens)
     if response.stop_reason == "refusal" or response.parsed_output is None:
         return JudgeResult(item.item_id, None, f"no verdict (stop_reason={response.stop_reason})", *usage)

@@ -31,11 +31,11 @@ def test_deploy_uploads_the_real_app_folder():
     url = deploy_space.deploy(api, "someone/support-bot", model_repo="someone/support-bot-GGUF")
     assert url == "https://huggingface.co/spaces/someone/support-bot"
     names = [name for name, _, _ in api.calls]
-    assert names == ["create_repo", "upload_folder", "add_space_variable"]
-    upload = api.calls[1][2]
+    assert names == ["create_repo", "add_space_variable", "upload_folder"]  # the variable is set before the restart
+    assert api.calls[1][1] == ("someone/support-bot", "MODEL_REPO", "someone/support-bot-GGUF")
+    upload = api.calls[2][2]
     assert upload["repo_type"] == "space"
     assert Path(upload["folder_path"]) == deploy_space.APP_DIR
-    assert api.calls[2][1] == ("someone/support-bot", "MODEL_REPO", "someone/support-bot-GGUF")
 
 
 def test_deploy_without_model_repo_skips_the_variable():

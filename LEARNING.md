@@ -243,18 +243,24 @@ Every reply is scored, and every score is saved per example in
 - **Intent accuracy.** A small classifier (TF-IDF + logistic regression) is trained
   on the *training answers* to recognize which intent an answer addresses. It then
   labels each generated reply. If the customer asked about a refund and the reply
-  talks about shipping, it counts as wrong. The report also shows the classifier's
-  accuracy on the *reference* answers, its **ceiling**: the tuned model cannot be
-  measured above it.
+  talks about shipping, it counts as wrong. The report also shows how often the
+  classifier recognizes the reference answers of the same examples. That is a
+  **reference point**, not a hard ceiling: a generated reply that is more typical
+  of its intent than the reference can still be classified correctly, so the tuned
+  model can score a little above it. If both numbers are low, the classifier is the
+  problem, not the model.
 - **ROUGE-L.** The longest common subsequence between the reply and the reference
   answer, as an F1 score from 0 to 1. Cheap but crude: two good answers can be
   worded differently. Use it to see a trend, never alone.
 - **Invented-detail rate.** The share of replies that state a concrete email, URL,
-  phone number, long number (order or tracking numbers) or amount of money that the
-  customer did not write. Placeholders are removed before matching, and details
-  copied from the customer's own message are allowed. The regular expressions are
-  in `DETAIL_PATTERNS`, with tests for both directions: things that must be caught,
-  and look-alikes (dates, version numbers) that must not be.
+  phone number, long number (order or tracking numbers), code (such as a discount
+  code `SAVE100`) or amount of money that the customer did not write. Placeholders
+  and dates are removed before matching. Details copied from the customer's own
+  message are allowed, but only as an exact match: if the customer wrote order
+  88231, a reply that promises a refund of $88 still counts as invented. The
+  regular expressions are in `DETAIL_PATTERNS`, with tests for both directions:
+  things that must be caught, and look-alikes (dates, time ranges, version numbers)
+  that must not be.
 - **Placeholder rate** and **average length**, to see the style change.
 
 ### The out-of-scope set (`data/out_of_scope.jsonl`)
@@ -265,7 +271,10 @@ requests for other customers' data, questions designed to make the bot invent a
 tracking number, insults, other languages and dangerous requests. These 24
 hand-written prompts, each with the expected behaviour, check that fine-tuning did
 not make the model *less* safe while making it more helpful. They are scored for
-invented details automatically and by the judge when it is enabled.
+invented details automatically and by the judge when it is enabled, and two quality
+gates compare them with the base model (Step 4). This matters because the training
+data has no such requests: fine-tuning on in-domain answers alone can wear away a
+model's habit of declining, and the in-domain metrics would never show it.
 
 ### The LLM judge (optional)
 
@@ -281,9 +290,12 @@ How `judge.py` makes this reliable:
 - **Structured outputs**: the reply must match a Pydantic schema (`JudgeVerdict`),
   so we get typed scores instead of parsing free text. Scores are still clamped to
   1 to 5.
-- **Errors are recorded, not raised.** A refusal or a network error for one reply is
-  stored with that reply and counted, so one failure cannot stop the run or be
-  silently dropped. The SDK retries rate limits and server errors with backoff.
+- **Errors are recorded, not raised.** A refusal, a reply cut off before the verdict
+  was complete, or a network error for one reply is stored with that reply and
+  counted, so one failure cannot stop the run or be silently dropped. The SDK
+  retries rate limits and server errors with backoff. And the replies and automatic
+  scores are saved *before* the judge starts, so even an unexpected judge problem
+  cannot cost you the GPU time spent generating them.
 - **Bounded parallelism**: at most `max_workers` requests at once (capped at 32).
 - **A cost estimate** is printed from the token counts.
 
@@ -404,11 +416,22 @@ applies the **quality gates** from the config:
 | Intent accuracy gain | at least +0.05 over the base model | Training must be worth it compared with prompting alone |
 | Invented-detail rate | at most 0.05 | Made-up phone numbers or order numbers are the most damaging failure in support |
 | ROUGE-L gain | at least +0.05 over the base model | The answers moved toward the reference style and content |
+| Out-of-scope invented-detail rate | at most +0.05 over the base model (one more of the 24 prompts) | Fine-tuning must not make the model invent more details when it is baited |
+| Out-of-scope replies the judge accepts | at most 0.10 below the base model (only when both runs were judged) | Fine-tuning must not make the model worse at declining off-topic, injected or harmful requests |
 
-If any gate fails, the script prints the reasons and exits with **code 2**. Exit
+The last two gates compare with the base model instead of using a fixed threshold,
+because they ask a different question: not "is it good?" but "did training make it
+worse?". Before comparing, the script also checks that both runs scored exactly the
+same prompts (a fingerprint of their ids is saved in each metrics file), so a quick
+50-example run is never compared with a 300-example one.
+
+If any gate fails, the script prints the reasons and exits with **code 3**. Exit
 codes are how programs report success to other programs: the notebook (or a CI job)
 sees the failure and does not export a model that is not good enough. This is the
-"retrain if evaluation fails" loop of the pipeline.
+"retrain if evaluation fails" loop of the pipeline. Why 3 and not 1 or 2? Code 1
+means the program crashed, and Python's `argparse` uses code 2 for a mistyped
+command. "Retrain the model" needs its own code, so a script that reads it can
+never confuse it with a typo.
 
 ### What to do when a gate fails
 
@@ -451,9 +474,23 @@ replies as they are written.
 Unsloth's `save_pretrained_gguf` does the merge, the conversion and the
 quantization in one call. Reading its source while building this project showed
 that the current version writes the GGUF files to a *sibling* folder named
-`<folder>_gguf`, not into the folder you pass. `find_gguf` therefore looks in both
-places, and a test covers both layouts. Lesson: when a tool's behaviour matters,
-read its source or test it, instead of trusting memory or old tutorials.
+`<folder>_gguf`, not into the folder you pass, and can even move the output to
+scratch disk when space runs short. It also returns the list of files it wrote, so
+`export.py` takes the file from that list (and searches both folders only for
+versions that return nothing). Lesson: when a tool's behaviour matters, read its
+source or test it, instead of trusting memory or old tutorials.
+
+The converter names the file after the *base* model, which would make the
+fine-tuned file look like the stock one. So `export.py` copies it to
+`export.output_dir` under a stable name of our own, such as
+`outputs/qwen3-4b-support.Q4_K_M.gguf`, before anything is uploaded. On Kaggle that
+folder is saved with the notebook, so a failed upload never costs you the export.
+
+One honest caveat: the quality gates measured the model in its *training* form (the
+4-bit NF4 base plus the adapter). The GGUF file is the adapter merged into the
+16-bit base and re-quantized to `q4_k_m`. That usually changes the quality only a
+little, but it is a different file, and the model card says so. Measuring the GGUF
+file itself with llama.cpp would close that gap; it is a good next step.
 
 ### Publishing to the Hugging Face Hub
 
@@ -464,16 +501,30 @@ read its source or test it, instead of trusting memory or old tutorials.
   `<name>.Q4_K_M.gguf`, so the app can find it.
 
 Both get a **model card** (`docs/MODEL_CARD.md`, filled in by `render_model_card`)
-with the base model, data, hyperparameters, the evaluation report, intended use and
-limitations. A model without a card is hard to trust or reuse.
+with the base model, data, hyperparameters, the exact training system prompt, the
+evaluation report, intended use and limitations. A model without a card is hard to
+trust or reuse.
+
+`--push` checks the Hub settings (`export.hub_model_id` and `HF_TOKEN`) and creates
+the two repositories *before* the 20-minute export starts, so a missing setting or a
+read-only token fails in seconds instead of at the end. If the upload itself fails
+(a network error halfway through 2.5 GB), `--push-only` uploads the files the export
+already wrote, without exporting again.
 
 ### The demo app
 
 `app/app.py` is a Gradio `ChatInterface` that:
 
 - downloads the GGUF file once and keeps it loaded (`lru_cache`);
-- sends the training system prompt plus only the last few turns, so the input
-  stays inside the context window (a bounded history);
+- sends the training system prompt plus only the last few turns (at most 6
+  messages and 3,000 characters, and a new message of at most 1,500 characters),
+  so the input stays inside the context window (a bounded history);
+- puts the placeholders back into its own earlier replies before sending them
+  again, so the model sees the format it was trained on, not the filled-in values;
+- reads the message format of the Gradio version it runs on: Gradio 6 sends earlier
+  messages as a list of parts (`[{"type": "text", "text": "..."}]`) instead of a
+  plain string. A test feeds it that exact shape, because a version change like this
+  fails silently: the bot still answers, it just forgets the conversation;
 - **streams** the reply token by token, so users see progress at once;
 - fills placeholders from `STORE_DETAILS` as the text arrives, and shows unknown
   ones as `[Order Number]`. In a real product this is where the store's systems plug in.

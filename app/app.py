@@ -46,8 +46,13 @@ MODEL_FILE = os.environ.get("MODEL_FILE", "*Q4_K_M.gguf")
 # os.cpu_count() reports the host's cores inside a container, which oversubscribes a 2-vCPU Space.
 N_THREADS = int(os.environ.get("N_THREADS", "2"))
 MAX_NEW_TOKENS = 400
-MAX_HISTORY_MESSAGES = 6  # bounded context: only the last 3 exchanges are sent
+# Bounded context: at most the last 3 exchanges, and at most HISTORY_CHAR_BUDGET characters
+# of them (about 4 characters per token), so the prompt plus the reply fits in CONTEXT_TOKENS.
+MAX_HISTORY_MESSAGES = 6
+HISTORY_CHAR_BUDGET = 3000
+MAX_MESSAGE_CHARS = 1500
 CONTEXT_TOKENS = 2048
+BRACKETED_RE = re.compile(r"\[([A-Z][^\[\]{}]{0,60})\]")
 EXAMPLES = [
     "I want to cancel my order",
     "How do I get a refund for a damaged item?",
@@ -62,16 +67,50 @@ def fill_placeholders(text: str, details: dict[str, str] = STORE_DETAILS) -> str
     return PLACEHOLDER_RE.sub(lambda m: details.get(m.group(1).strip(), f"[{m.group(1).strip()}]"), text)
 
 
+def restore_placeholders(text: str, details: dict[str, str] = STORE_DETAILS) -> str:
+    """Undo fill_placeholders on a reply we showed, so the model sees its own format again."""
+    for key, value in details.items():
+        text = text.replace(value, "{{" + key + "}}")
+    return BRACKETED_RE.sub(lambda m: "{{" + m.group(1) + "}}", text)
+
+
+def message_text(content: Any) -> str:
+    """The text of one chat message.
+
+    Gradio 6 passes earlier messages with content as a list of parts, such as
+    [{"type": "text", "text": "..."}]; older versions pass a plain string. Files
+    and images have no text and are skipped.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(str(p.get("text", "")) for p in content if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+
+def recent_turns(history: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """The most recent text turns that fit the history budget, oldest first."""
+    turns: list[dict[str, str]] = []
+    used = 0
+    for m in reversed(history[-MAX_HISTORY_MESSAGES:]):
+        text = message_text(m.get("content")).strip()
+        if m.get("role") not in ("user", "assistant") or not text:
+            continue
+        if used + len(text) > HISTORY_CHAR_BUDGET:
+            break
+        used += len(text)
+        role = str(m["role"])
+        turns.append({"role": role, "content": restore_placeholders(text) if role == "assistant" else text})
+    return turns[::-1]
+
+
 def build_messages(message: str, history: list[dict[str, Any]]) -> list[dict[str, str]]:
     """System prompt + the most recent text turns + the new user message."""
     if not message.strip():
         raise ValueError("empty message")
-    turns = [
-        {"role": str(m["role"]), "content": str(m["content"])}
-        for m in history[-MAX_HISTORY_MESSAGES:]
-        if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
-    ]
-    return [{"role": "system", "content": SYSTEM_PROMPT}, *turns, {"role": "user", "content": message}]
+    if len(message) > MAX_MESSAGE_CHARS:
+        raise ValueError(f"Please keep your message under {MAX_MESSAGE_CHARS:,} characters.")
+    return [{"role": "system", "content": SYSTEM_PROMPT}, *recent_turns(history), {"role": "user", "content": message}]
 
 
 @lru_cache(maxsize=1)
@@ -83,14 +122,25 @@ def get_model() -> Any:  # pragma: no cover - downloads the GGUF model
         filename=MODEL_FILE,
         n_ctx=CONTEXT_TOKENS,
         n_threads=N_THREADS,
+        n_threads_batch=N_THREADS,  # prompt processing; llama.cpp would otherwise use every host core
         verbose=False,
     )
 
 
 def respond(message: str, history: list[dict[str, Any]]) -> Iterator[str]:  # pragma: no cover - needs the model
     """Stream the reply token by token, filling placeholders as they complete."""
-    stream = get_model().create_chat_completion(
-        messages=build_messages(message, history),
+    try:
+        messages = build_messages(message, history)
+    except ValueError as exc:
+        yield str(exc)
+        return
+    try:
+        model = get_model()
+    except (OSError, ValueError, RuntimeError, ImportError) as exc:  # download or load failed: say so, keep the UI up
+        yield f"The model could not be loaded ({type(exc).__name__}). Check MODEL_REPO in the Space settings."
+        return
+    stream = model.create_chat_completion(
+        messages=messages,
         max_tokens=MAX_NEW_TOKENS,
         temperature=0.2,
         stream=True,
@@ -113,6 +163,9 @@ def build_demo() -> Any:  # pragma: no cover - UI wiring
             "Demo only: no real orders or accounts."
         ),
         examples=EXAMPLES,
+        # Gradio caches examples at startup on Spaces by default: that would download the
+        # model and generate every example before the page can load.
+        cache_examples=False,
     )
 
 

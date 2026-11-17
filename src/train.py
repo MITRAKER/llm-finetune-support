@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from common import load_config, set_seed, write_json
+from common import load_config, set_seed, use_one_gpu, write_json
 
 BACKENDS = ("unsloth", "hf")
 TRACKED_PACKAGES = ("torch", "transformers", "trl", "peft", "datasets", "bitsandbytes", "unsloth", "accelerate")
@@ -147,9 +147,17 @@ def _load_hf(cfg: dict[str, Any]) -> tuple[Any, Any, Any]:
 
 
 def count_parameters(model: Any) -> dict[str, Any]:
-    """How many weights we actually train vs. the total model size."""
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in model.parameters())
+    """How many weights we actually train vs. the total model size.
+
+    A 4-bit weight matrix packs two weights into each byte, so its tensor reports
+    only half of them. PEFT's own counter corrects for that, so we use it when the
+    model has one (every LoRA model does).
+    """
+    if hasattr(model, "get_nb_trainable_parameters"):
+        trainable, total = model.get_nb_trainable_parameters()
+    else:
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in model.parameters())
     return {"trainable": trainable, "total": total, "trainable_pct": round(100 * trainable / max(total, 1), 4)}
 
 
@@ -276,4 +284,5 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
+    use_one_gpu()  # before anything imports torch
     main()

@@ -50,10 +50,22 @@ reply. The demo app in the repository shows how (`fill_placeholders` in `app/app
 | Loss | on the assistant's answer only (completion-only loss) |
 | Export | GGUF, `{{quantization}}` |
 
-The system prompt used in training is in `src/common.py`. Use the same prompt at
-inference time: the model answers best with the exact prompt it was trained with.
+The model was trained with this system prompt. Use exactly the same prompt at
+inference time: the model answers best, and writes placeholders most reliably,
+with the prompt it was trained with.
+
+```text
+{{system_prompt}}
+```
 
 ## Evaluation
+
+These numbers were measured on the fine-tuned model in its training form (the
+4-bit NF4 base model plus the LoRA adapter), on held-out test questions and 24
+out-of-scope prompts (off-topic requests, prompt injection, requests for other
+customers' data). The GGUF file is the same adapter merged into the 16-bit base
+model and quantized to `{{quantization}}`. That conversion usually changes the
+quality only slightly, but it was not measured separately.
 
 {{evaluation_report}}
 
@@ -64,10 +76,12 @@ With llama.cpp (CPU, from the GGUF repository):
 ```python
 from llama_cpp import Llama
 
+SYSTEM_PROMPT = """{{system_prompt}}"""
+
 llm = Llama.from_pretrained(repo_id="{{hub_model_id}}-GGUF", filename="{{gguf_file}}", n_ctx=2048)
 reply = llm.create_chat_completion(
     messages=[
-        {"role": "system", "content": SYSTEM_PROMPT},  # copy it from src/common.py
+        {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": "I want to cancel my order"},
     ],
     temperature=0.3,
@@ -86,9 +100,10 @@ load the base model, then `PeftModel.from_pretrained(base_model, "{{hub_model_id
   other languages, unusual requests and multi-step problems.
 - Like any language model it can be wrong. Keep a human in the loop for refunds,
   payments and anything that affects a customer's money or data.
-- It is trained to decline off-topic requests and prompt-injection attempts, but
-  that behaviour is not guaranteed. The repository's evaluation includes a set of
-  out-of-scope prompts so you can measure it.
+- It was not trained on off-topic or adversarial requests. The evaluation measures
+  how it handles 24 such prompts and checks that it is not worse than the base
+  model (the out-of-scope rows above), but nothing guarantees that it declines
+  them. Put your own guardrails in front of it.
 
 ## License
 

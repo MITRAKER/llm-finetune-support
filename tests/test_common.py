@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -59,3 +60,46 @@ def test_build_messages_keeps_recent_text_turns_only():
     assert len(msgs) == 1 + (app.MAX_HISTORY_MESSAGES - 1) + 1
     with pytest.raises(ValueError, match="empty"):
         app.build_messages("   ", [])
+    with pytest.raises(ValueError, match="under 1,500 characters"):
+        app.build_messages("x" * (app.MAX_MESSAGE_CHARS + 1), [])
+
+
+def test_build_messages_reads_the_gradio_6_history_format():
+    """Gradio 6 sends earlier messages as lists of parts; the second turn must still see the first."""
+    reply = "Sure. Call +1 (555) 010-0199 about [Order Number]."  # as the app showed it
+    history = [
+        {"role": "user", "metadata": None, "content": [{"text": "I want to cancel my order", "type": "text"}]},
+        {"role": "assistant", "content": [{"text": reply, "type": "text"}]},
+        {"role": "user", "content": [{"type": "file", "file": {"path": "photo.png"}}]},  # no text: skipped
+    ]
+    msgs = app.build_messages("It's 12345", history)
+    assert [m["role"] for m in msgs] == ["system", "user", "assistant", "user"]
+    assert msgs[1]["content"] == "I want to cancel my order"
+    # The model sees its own reply with the placeholders it wrote, not the values the app filled in.
+    assert msgs[2]["content"] == "Sure. Call {{Customer Support Phone Number}} about {{Order Number}}."
+
+
+def test_history_is_bounded_by_characters_too():
+    long_turn = "x" * (app.HISTORY_CHAR_BUDGET - 10)
+    history = [{"role": "user", "content": "old question"}, {"role": "assistant", "content": long_turn}]
+    msgs = app.build_messages("next", history)
+    assert [m["content"] for m in msgs[1:]] == [long_turn, "next"]  # the older turn no longer fits
+
+
+def test_restore_placeholders_undoes_fill_placeholders():
+    text = "Call {{Customer Support Phone Number}} about {{Order Number}}."
+    assert app.restore_placeholders(app.fill_placeholders(text)) == text
+
+
+def test_use_one_gpu_respects_an_existing_choice_and_distributed_launchers(monkeypatch: pytest.MonkeyPatch):
+    for name in ("CUDA_VISIBLE_DEVICES", "WORLD_SIZE", "LOCAL_RANK"):
+        monkeypatch.delenv(name, raising=False)
+    common.use_one_gpu()
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    common.use_one_gpu()
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES")
+    monkeypatch.setenv("WORLD_SIZE", "2")  # torchrun decides which GPU each process uses
+    common.use_one_gpu()
+    assert "CUDA_VISIBLE_DEVICES" not in os.environ

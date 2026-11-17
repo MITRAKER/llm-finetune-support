@@ -33,7 +33,7 @@ flowchart LR
     D --> E["4. Evaluate<br/>metrics + optional LLM judge"]
     C --> F{"Quality gates"}
     E --> F
-    F -- "fail: exit code 2" --> G["Fix data or<br/>hyperparameters"] --> D
+    F -- "fail: exit code 3" --> G["Fix data or<br/>hyperparameters"] --> D
     F -- pass --> H["5. Export<br/>merge + GGUF q4_k_m"]
     H --> I["Hugging Face Hub<br/>adapter, GGUF, model card"]
     I --> J["Gradio demo<br/>free CPU Space"]
@@ -62,9 +62,11 @@ training run on Kaggle.
 | ROUGE-L against the reference answer | _pending_ | _pending_ | at least +0.05 over the base model |
 | Invented-detail rate (lower is better) | _pending_ | _pending_ | at most 0.05 |
 | Uses placeholders | _pending_ | _pending_ | |
+| Out-of-scope prompts: invented-detail rate | _pending_ | _pending_ | at most +0.05 over the base model |
 | LLM judge: acceptable as sent (optional) | _pending_ | _pending_ | |
+| LLM judge, out-of-scope prompts: acceptable (optional) | _pending_ | _pending_ | at most 0.10 below the base model |
 
-If any gate fails, `evaluate.py --compare` exits with code 2 and lists the reasons,
+If any gate fails, `evaluate.py --compare` exits with code 3 and lists the reasons,
 and the notebook stops before exporting: the fix is better data or hyperparameters,
 then retraining.
 
@@ -125,15 +127,18 @@ prompt. On 300 held-out test questions plus 24 hand-written out-of-scope prompts
 hallucination bait, abuse, other languages) it measures:
 
 - **Intent accuracy**: a TF-IDF classifier trained on the training answers checks
-  that each reply addresses the right request (its ceiling on the reference answers
-  is reported too).
+  that each reply addresses the right request (its accuracy on the reference
+  answers is reported too, as a reference point).
 - **ROUGE-L**: overlap with the reference answer; a rough signal only.
 - **Invented-detail rate**: replies containing a concrete phone number, email, URL,
-  long number or amount that the customer did not provide.
+  long number, code or amount that the customer did not provide.
 - **Placeholder use** and **length**.
 - Optionally, an **LLM judge** (Claude, through the Anthropic API with structured
   outputs) scores correctness, helpfulness and tone and decides if a support lead
   would send the reply as-is.
+
+The out-of-scope prompts are gated too: fine-tuning must not make the model invent
+more details, or decline worse, than the base model does on them.
 
 **Deployment.** The adapter is merged into the base model and converted to a 4-bit
 GGUF file (about 2.5 GB) that llama.cpp runs on a CPU. The Gradio app streams replies
@@ -192,6 +197,9 @@ LEARNING.md     the step-by-step lesson
 - The automatic metrics are proxies: ROUGE-L rewards wording overlap, and the intent
   classifier only checks the topic. That is why the LLM judge and a manual read of
   `results/*_predictions.jsonl` are part of the evaluation.
+- The gates measure the model in its training form (4-bit base plus adapter). The
+  GGUF file is the merged model quantized again, which usually costs little quality
+  but is not measured separately.
 - It is a demo: it has no access to real orders or accounts, and replies about money
   or personal data should always be checked by a person.
 

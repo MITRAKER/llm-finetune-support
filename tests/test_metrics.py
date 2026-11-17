@@ -25,10 +25,44 @@ def test_strip_reasoning():
         ("Your order #482913 has shipped.", "long_number"),
         ("You will be refunded $49.99.", "money"),
         ("A fee of 15 dollars applies.", "money"),
+        ("Call us at (555)123-4567.", "phone"),
+        ("Call us at 555-1234.", "phone"),
+        ("Call +1 555 0100 for help.", "phone"),
+        ("Your tracking number is 1Z999AA10123456784.", "code"),
+        ("Use the discount code SAVE100 at checkout.", "code"),
+        ("Visit shop.example.de for details.", "url"),
     ],
 )
 def test_invented_details_flags_made_up_specifics(text, kind):
     assert kind in m.invented_details(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "It was placed on 12.05.2024 and shipped on 14.05.2024.",
+        "It was placed on 12-05-2024.",
+        "Delivery takes 3-5 business days; chat is open 9:00-17:00, 24/7.",
+        "COVID-19 rules may delay some parcels.",
+    ],
+)
+def test_dates_and_ordinary_numbers_are_not_flagged(text):
+    assert m.invented_details(text) == {}
+
+
+@pytest.mark.parametrize("reply", ["You will be refunded $88.", "A refund of $8,823 was issued.", "You get $231 back."])
+def test_numbers_inside_the_order_number_do_not_excuse_an_invented_amount(reply):
+    """The customer's order number 88231 must not excuse a made-up refund of $88 (exact match, not substring)."""
+    found = m.invented_details(reply, user_message="How much exactly will I be refunded for order 88231?")
+    assert "money" in found
+
+
+def test_details_the_customer_gave_may_be_repeated_in_any_format():
+    assert m.invented_details("Order #88231 has shipped.", user_message="Where is order 88231?") == {}
+    assert m.invented_details("I see the charge of $49.99.", user_message="I was charged 49.99 twice") == {}
+    assert m.invented_details("Code SAVE100 is applied.", user_message="my code save100 fails") == {}
+    assert m.invented_details("Refunds over $10,000 need approval.", user_message="Refund over $10,000?") == {}
+    assert "money" in m.invented_details("We can refund $100 now.", user_message="Refund over $10,000?")
 
 
 def test_placeholders_and_user_supplied_details_are_not_flagged():

@@ -1,8 +1,8 @@
 """Continuous deployment: publish the demo app in app/ to a Hugging Face Space.
 
-The GitHub workflow .github/workflows/deploy-space.yml runs this after every
-change to app/ on main, so the public demo always matches the reviewed code.
-It can also be run by hand:
+The GitHub workflow .github/workflows/deploy-space.yml runs this each time CI
+passes on main, so the public demo always matches the reviewed code. It can
+also be run by hand:
 
     HF_TOKEN=... python tools/deploy_space.py --space your-name/support-bot --model-repo your-name/support-bot-GGUF
 """
@@ -25,6 +25,9 @@ def deploy(api: Any, space_id: str, app_dir: Path = APP_DIR, model_repo: str | N
     if not (app_dir / "app.py").is_file() or not (app_dir / "README.md").is_file():
         raise FileNotFoundError(f"{app_dir} must contain app.py and the Space README.md")
     api.create_repo(space_id, repo_type="space", space_sdk="gradio", exist_ok=True)
+    if model_repo:
+        # Set before the upload: the upload restarts the Space, and app.py reads MODEL_REPO at startup.
+        api.add_space_variable(space_id, "MODEL_REPO", model_repo)
     api.upload_folder(
         repo_id=space_id,
         repo_type="space",
@@ -32,8 +35,6 @@ def deploy(api: Any, space_id: str, app_dir: Path = APP_DIR, model_repo: str | N
         ignore_patterns=IGNORE,
         commit_message="Deploy the demo app from GitHub",
     )
-    if model_repo:
-        api.add_space_variable(space_id, "MODEL_REPO", model_repo)  # read by app.py at startup
     return f"https://huggingface.co/spaces/{space_id}"
 
 
