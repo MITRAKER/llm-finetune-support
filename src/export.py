@@ -167,8 +167,13 @@ def push_to_hub(cfg: dict[str, Any], gguf: Path) -> dict[str, str]:  # pragma: n
         raise FileNotFoundError(f"Nothing to upload: export first (missing {gguf} or {adapter_dir(cfg)}).")
     api = HfApi(token=token)
     adapter_repo, gguf_repo = create_hub_repos(api, repo)
-    # The small adapter, for people who use transformers + peft.
-    api.upload_folder(repo_id=adapter_repo, folder_path=str(adapter_dir(cfg)), commit_message="Upload the LoRA adapter")
+    # The small adapter, for people who use transformers + peft (not the pickled training arguments).
+    api.upload_folder(
+        repo_id=adapter_repo,
+        folder_path=str(adapter_dir(cfg)),
+        ignore_patterns=["training_args.bin"],
+        commit_message="Upload the LoRA adapter",
+    )
     api.upload_file(path_or_fileobj=str(gguf), path_in_repo=gguf.name, repo_id=gguf_repo)
     card = render_model_card(cfg, cfg["eval"]["results_dir"])
     for target in (gguf_repo, adapter_repo):
