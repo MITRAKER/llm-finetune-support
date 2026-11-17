@@ -1,0 +1,6 @@
+# Hugging Face Space (CPU). Prebuilt CPU wheels for llama-cpp-python come from the
+# project's own index; if none matches the Space's Python, pip builds it from source
+# (slower first start, same result).
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+llama-cpp-python==0.3.37
+huggingface-hub==2.4.0
