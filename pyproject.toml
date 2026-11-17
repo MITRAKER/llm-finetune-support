@@ -1,0 +1,117 @@
+[project]
+name = "llm-finetune-support"
+version = "0.1.0"
+description = "QLoRA fine-tune of a small open LLM into a customer support assistant, with evaluation, quality gates and a demo."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Mitra Kermanian" }]
+keywords = ["llm", "fine-tuning", "qlora", "lora", "unsloth", "trl", "customer-support"]
+
+[project.urls]
+Repository = "https://github.com/MITRAKER/llm-finetune-support"
+Changelog = "https://github.com/MITRAKER/llm-finetune-support/blob/main/CHANGELOG.md"
+
+# ---------------------------------------------------------------------------
+# Tests and coverage
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "slow: end-to-end smoke test that needs torch/transformers/trl/peft (deselect with -m 'not slow')",
+]
+# Power of Ten rule 10: zero warnings. Any warning fails the tests, except the
+# known third-party ones listed here (each with the reason it is harmless).
+filterwarnings = [
+    "error",
+    # PyTorch warns that pinned memory is unused when there is no GPU (CPU smoke test).
+    "ignore:'pin_memory' argument is set as true but no accelerator is found:UserWarning",
+]
+
+[tool.coverage.run]
+source = ["src", "tools", "app"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+
+# ---------------------------------------------------------------------------
+# Linting and formatting (ruff)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle errors and warnings
+    "F",        # pyflakes: unused imports, undefined names
+    "I",        # import sorting
+    "B",        # bugbear: likely bugs (mutable default args, loop variable capture, ...)
+    "UP",       # pyupgrade: modern syntax
+    "SIM",      # simplifications
+    "C90",      # McCabe cyclomatic complexity (Power of Ten rule 1/4)
+    "PL",       # pylint: too many branches/statements/arguments, ...
+    "S",        # bandit: security issues
+    "BLE",      # no blind `except Exception`
+    "RET",      # consistent returns
+    "PT",       # pytest style
+    "N",        # pep8 naming
+    "RUF",      # ruff-specific rules
+    "PERF",     # performance anti-patterns
+]
+ignore = [
+    "PLR2004",  # magic values in comparisons: too noisy for data/ML code
+    "PLC0415",  # imports inside functions: we import heavy GPU libraries lazily on purpose
+    "RUF001", "RUF002", "RUF003",  # ambiguous unicode in strings/comments (test data uses it on purpose)
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 8
+max-branches = 12
+max-statements = 50
+max-returns = 6
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may use assert, random numbers and token strings that look like passwords to bandit.
+"tests/**" = ["S101", "S106", "S311", "PLR0913", "S603", "S607"]
+
+# ---------------------------------------------------------------------------
+# Type checking (mypy)
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+files = ["src", "tools", "app"]
+mypy_path = "src"
+explicit_package_bases = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+warn_unreachable = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+# Heavy ML libraries: untyped, or not installed in the lint job.
+module = [
+    "datasets.*", "sklearn.*", "rouge_score.*", "unsloth.*", "trl.*", "peft.*",
+    "transformers.*", "torch.*", "llama_cpp.*", "gradio.*", "huggingface_hub.*", "anthropic.*", "pandas.*",
+]
+ignore_missing_imports = true
+follow_imports = "skip"

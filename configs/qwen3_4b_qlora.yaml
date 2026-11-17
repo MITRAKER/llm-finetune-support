@@ -1,0 +1,70 @@
+# One experiment = one config file. Every knob that changes the result lives
+# here, so a run can be repeated exactly from this file plus the git commit.
+# Copy this file to try a different model or hyperparameters.
+
+seed: 42
+
+data:
+  source: bitext/Bitext-customer-support-llm-chatbot-training-dataset
+  out_dir: data/processed
+  val_fraction: 0.1
+  test_fraction: 0.1
+  min_instruction_chars: 5
+  min_response_chars: 20
+  max_response_chars: 3000
+
+model:
+  # Hugging Face id of the base model. The Unsloth copy is pre-quantized to
+  # 4-bit, so it downloads faster and loads with less memory on a free GPU.
+  name: unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit
+  max_seq_length: 1024     # longest example (prompt + answer) in tokens; longer ones are truncated
+  load_in_4bit: true       # QLoRA: freeze the base model in 4-bit
+
+lora:
+  r: 16                    # rank of the adapter matrices: capacity of the update
+  alpha: 16                # scaling: the update is multiplied by alpha / r
+  dropout: 0.0
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+train:
+  backend: unsloth         # "unsloth" (fast, GPU only) or "hf" (plain transformers + peft)
+  output_dir: outputs/qwen3-4b-support-lora
+  num_train_epochs: 1
+  max_steps: -1            # set > 0 to stop early (quick experiments)
+  max_train_samples: null  # e.g. 5000 to train on a subset when GPU time is short
+  max_eval_samples: 500    # validation loss is computed on this many examples
+  per_device_train_batch_size: 8
+  gradient_accumulation_steps: 2   # effective batch = 8 x 2 = 16 examples per update
+  learning_rate: 2.0e-4
+  lr_scheduler_type: cosine
+  warmup_steps: 0.03       # below 1 = fraction of all steps (3% warmup)
+  weight_decay: 0.01
+  optim: adamw_8bit
+  logging_steps: 10
+  eval_steps: 100
+  save_steps: 100
+  save_total_limit: 2
+  report_to: auto          # "wandb" if WANDB_API_KEY is set, otherwise "none"
+
+eval:
+  n_samples: 300           # test examples to generate answers for (generation is the slow part)
+  max_new_tokens: 400
+  batch_size: 16
+  results_dir: results
+  out_of_scope_file: data/out_of_scope.jsonl
+  judge:
+    model: claude-opus-5-5 # LLM-as-judge (optional, needs ANTHROPIC_API_KEY); claude-haiku-5-5 costs far less
+    effort: low
+    max_workers: 8
+  # Quality gates. If the tuned model misses any of them, evaluate.py exits
+  # with code 2 and says why: fix the data or hyperparameters and retrain.
+  gates:
+    min_intent_accuracy: 0.85
+    min_intent_accuracy_gain: 0.05   # must beat the prompted base model by this much
+    max_invented_detail_rate: 0.05
+    min_rouge_l_gain: 0.05
+
+export:
+  hub_model_id: null       # e.g. "your-hf-username/qwen3-4b-support"; null = save locally only
+  gguf_quantization: q4_k_m
+  merged_dir: outputs/merged   # 16-bit merge (~8 GB); the GGUF lands in outputs/merged_gguf
