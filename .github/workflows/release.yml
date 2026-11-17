@@ -1,0 +1,31 @@
+# Release: pushing a tag such as v0.2.0 creates a GitHub release whose notes are
+# the matching section of CHANGELOG.md. The tag must match pyproject.toml.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Check the tag matches the project version and extract the notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python tools/release_notes.py "$TAG" > release-notes.md
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --title "$TAG" --notes-file release-notes.md --verify-tag

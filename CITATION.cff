@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this project, please cite it as below."
+title: "llm-finetune-support: QLoRA fine-tuning of a small open LLM into a customer support assistant"
+type: software
+authors:
+  - family-names: Kermanian
+    given-names: Mitra
+version: 0.1.0
+date-released: "2026-11-17"
+license: MIT
+repository-code: "https://github.com/MITRAKER/llm-finetune-support"
+keywords:
+  - llm
+  - fine-tuning
+  - qlora
+  - customer-support

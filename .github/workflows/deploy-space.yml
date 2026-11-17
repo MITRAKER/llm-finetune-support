@@ -1,0 +1,54 @@
+# Continuous deployment: after CI passes on main, publish app/ to the Hugging
+# Face Space. Does nothing until the HF_TOKEN secret and the HF_SPACE_ID
+# variable are set (Settings > Secrets and variables > Actions).
+name: Deploy demo
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-space
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Hugging Face Spaces
+    # Only deploy code that passed CI after a push to this repository's main branch (or a
+    # manual run). The extra checks stop a pull request from a fork whose branch happens
+    # to be called "main" from triggering a deploy that can read the HF_TOKEN secret.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_SPACE_ID: ${{ vars.HF_SPACE_ID }}
+      HF_MODEL_REPO: ${{ vars.HF_MODEL_REPO }}
+    steps:
+      - name: Not configured yet
+        if: env.HF_TOKEN == '' || env.HF_SPACE_ID == ''
+        run: echo "::notice::Skipping the deploy. Set the HF_TOKEN secret and the HF_SPACE_ID variable to enable it."
+      - uses: actions/checkout@v6
+        if: env.HF_TOKEN != '' && env.HF_SPACE_ID != ''
+        with:
+          # Deploy exactly the commit that passed CI.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: actions/setup-python@v6
+        if: env.HF_TOKEN != '' && env.HF_SPACE_ID != ''
+        with:
+          python-version: "3.12"
+      - name: Upload the app to the Space
+        if: env.HF_TOKEN != '' && env.HF_SPACE_ID != ''
+        run: |
+          pip install "huggingface-hub==2.4.0"
+          python tools/deploy_space.py --space "$HF_SPACE_ID" ${HF_MODEL_REPO:+--model-repo "$HF_MODEL_REPO"}

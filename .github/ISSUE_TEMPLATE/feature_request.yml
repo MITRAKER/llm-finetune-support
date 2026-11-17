@@ -1,0 +1,21 @@
+name: Improvement idea
+description: Suggest a change to the pipeline, the evaluation or the docs
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What do you propose?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: How would we know it helped?
+      description: For example a metric in results/REPORT.md that should move.
