@@ -6,7 +6,7 @@
 accelerate==1.16.0
 bitsandbytes>=0.45.5,!=0.46.0,!=0.48.0
 datasets==4.8.5
-huggingface-hub>=1.5,<2
+huggingface-hub>=2.4.0,<3
 peft==0.21.3
 transformers==5.17.0
 trl==1.15.0
