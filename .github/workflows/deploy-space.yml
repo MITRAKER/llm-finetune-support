@@ -38,12 +38,12 @@ jobs:
       - name: Not configured yet
         if: env.HF_TOKEN == '' || env.HF_SPACE_ID == ''
         run: echo "::notice::Skipping the deploy. Set the HF_TOKEN secret and the HF_SPACE_ID variable to enable it."
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         if: env.HF_TOKEN != '' && env.HF_SPACE_ID != ''
         with:
           # Deploy exactly the commit that passed CI.
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: env.HF_TOKEN != '' && env.HF_SPACE_ID != ''
         with:
           python-version: "3.12"
