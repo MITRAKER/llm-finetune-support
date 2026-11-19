@@ -8,6 +8,9 @@ Usage:
     # Compare the two and check the quality gates (exit code 3 = retrain)
     python src/evaluate.py --config configs/qwen3_4b_qlora.yaml --compare
 
+The examples come from the split in eval.split (or --split): "validation" while you
+iterate on the gates, "test" once for the final report.
+
 Each evaluation writes results/<name>_predictions.jsonl (every prompt, reply and
 score, for error analysis) and results/<name>_metrics.json (the averages).
 """
@@ -30,16 +33,26 @@ from common import build_prompt_messages, load_config, read_jsonl, set_seed, wri
 # must not look like a mistyped command to a script or CI job that reads the code.
 EXIT_GATES_FAILED = 3
 
+# Splits a model may be evaluated on. Never "train": the model has seen those answers.
+EVAL_SPLITS = ("validation", "test")
+
 
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
-def load_eval_examples(data_dir: str | Path, n_samples: int) -> list[dict[str, Any]]:
-    """The first n test examples (the test split is already shuffled)."""
-    rows = read_jsonl(Path(data_dir) / "test.jsonl")
+def load_eval_examples(data_dir: str | Path, n_samples: int, split: str = "test") -> list[dict[str, Any]]:
+    """The first n examples of the validation or test split (both are already shuffled)."""
+    if split not in EVAL_SPLITS:
+        raise ValueError(f"eval.split must be one of {', '.join(EVAL_SPLITS)}, not {split!r}")
     if n_samples <= 0:
         raise ValueError("eval.n_samples must be positive")
+    rows = read_jsonl(Path(data_dir) / f"{split}.jsonl")
     return rows[:n_samples]
+
+
+def eval_split(cfg: dict[str, Any]) -> str:
+    """The split this config evaluates on; test unless eval.split says otherwise."""
+    return str(cfg["eval"].get("split", "test"))
 
 
 def user_text(example: dict[str, Any]) -> str:
@@ -205,7 +218,7 @@ def run_judge(cfg: dict[str, Any], gen: Generated) -> tuple[dict[str, Any], list
 def generate_all(cfg: dict[str, Any], which: str, backend: str, adapter_dir: str | None) -> Generated:
     """Load the model and generate replies for the test examples and the out-of-scope prompts."""
     ecfg = cfg["eval"]
-    examples = load_eval_examples(cfg["data"]["out_dir"], ecfg["n_samples"])
+    examples = load_eval_examples(cfg["data"]["out_dir"], ecfg["n_samples"], eval_split(cfg))
     oos = read_jsonl(ecfg["out_of_scope_file"])
     model, tokenizer = load_for_inference(cfg, which, backend, adapter_dir)
     conversations = [ex["prompt"] for ex in examples] + [build_prompt_messages(o["prompt"]) for o in oos]
@@ -222,6 +235,7 @@ def score(cfg: dict[str, Any], which: str, gen: Generated) -> Scored:
     oos_details = [metrics.invented_details(r, o["prompt"]) for o, r in zip(gen.oos, gen.oos_replies, strict=True)]
     report: dict[str, Any] = {
         "model": which,
+        "split": eval_split(cfg),
         "sample_fingerprint": sample_fingerprint(gen),
         "metrics": summary.as_dict(),
         # How often the classifier recognises the intent of the reference answers of the same
@@ -373,8 +387,9 @@ def check_comparable(base: dict[str, Any], tuned: dict[str, Any]) -> None:
     if base.get("sample_fingerprint") != tuned.get("sample_fingerprint"):
         raise ValueError(
             "The base and tuned results were scored on different prompts "
-            f"(base: {base['metrics']['n']} test examples, tuned: {tuned['metrics']['n']}). "
-            "Evaluate both models with the same data and the same eval.n_samples, then compare again."
+            f"(base: {base['metrics']['n']} {base.get('split', 'test')} examples, "
+            f"tuned: {tuned['metrics']['n']} {tuned.get('split', 'test')} examples). "
+            "Evaluate both models with the same data, eval.split and eval.n_samples, then compare again."
         )
 
 
@@ -389,7 +404,8 @@ def compare(cfg: dict[str, Any]) -> int:
     lines = [
         "# Evaluation report",
         "",
-        f"Test examples: {tuned['metrics']['n']}, plus {tuned['out_of_scope']['n']} out-of-scope prompts. "
+        f"{tuned.get('split', 'test').capitalize()} examples: {tuned['metrics']['n']}, "
+        f"plus {tuned['out_of_scope']['n']} out-of-scope prompts. "
         "On the reference answers of the same examples, the intent classifier is right "
         f"{tuned['intent_classifier_reference_accuracy']:.3f} of the time (a reference point for intent accuracy).",
         "",
@@ -412,12 +428,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--backend", choices=["unsloth", "hf"], help="override train.backend")
     parser.add_argument("--adapter", help="adapter folder (default: <train.output_dir>/final_adapter)")
     parser.add_argument("--n-samples", type=int, help="override eval.n_samples")
+    parser.add_argument("--split", choices=EVAL_SPLITS, help="override eval.split (validation or test)")
     parser.add_argument("--no-judge", action="store_true", help="skip the LLM judge even if a key is set")
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config)
     if args.n_samples:
         cfg["eval"]["n_samples"] = args.n_samples
+    if args.split:
+        cfg["eval"]["split"] = args.split
     if args.compare:
         return compare(cfg)
     use_judge = judge_mod.judge_available() and not args.no_judge

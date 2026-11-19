@@ -175,6 +175,43 @@ def test_load_eval_examples_validates_n(tmp_path: Path):
         evaluate.load_eval_examples(tmp_path, 0)
 
 
+def test_eval_examples_come_from_the_chosen_split_and_never_from_train(tmp_path: Path):
+    for split in ("train", "validation", "test"):
+        write_jsonl(tmp_path / f"{split}.jsonl", [{"id": f"{split}-00000"}])
+    assert evaluate.load_eval_examples(tmp_path, 5, "validation") == [{"id": "validation-00000"}]
+    assert evaluate.load_eval_examples(tmp_path, 5) == [{"id": "test-00000"}]
+    with pytest.raises(ValueError, match=r"eval\.split must be one of validation, test"):
+        evaluate.load_eval_examples(tmp_path, 5, "train")
+    assert evaluate.eval_split({"eval": {}}) == "test"
+    assert evaluate.eval_split({"eval": {"split": "validation"}}) == "validation"
+
+
+def test_split_option_overrides_the_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(evaluate, "compare", lambda cfg: seen.update(cfg["eval"]) or 0)
+    config = tmp_path / "c.yaml"
+    config.write_text("eval:\n  split: test\n  n_samples: 300\n", encoding="utf-8")
+    assert evaluate.main(["--config", str(config), "--compare", "--split", "validation", "--n-samples", "50"]) == 0
+    assert seen["split"] == "validation"
+    assert seen["n_samples"] == 50
+    with pytest.raises(SystemExit):
+        evaluate.main(["--config", str(config), "--compare", "--split", "train"])
+
+
+def test_report_names_the_split_and_compare_refuses_to_mix_splits(tmp_path: Path):
+    cfg = {"eval": {"results_dir": str(tmp_path), "gates": GATES}}
+    base = {**report(0.7, 0.2, 0.3), "split": "validation"}
+    tuned = {**report(0.93, 0.45, 0.01), "split": "validation"}
+    (tmp_path / "base_metrics.json").write_text(json.dumps(base), encoding="utf-8")
+    (tmp_path / "tuned_metrics.json").write_text(json.dumps(tuned), encoding="utf-8")
+    assert evaluate.compare(cfg) == 0
+    assert "Validation examples: 300" in (tmp_path / "REPORT.md").read_text(encoding="utf-8")
+    on_test = {**tuned, "split": "test", "sample_fingerprint": "def456"}
+    (tmp_path / "tuned_metrics.json").write_text(json.dumps(on_test), encoding="utf-8")
+    with pytest.raises(ValueError, match="300 validation examples, tuned: 300 test examples"):
+        evaluate.compare(cfg)
+
+
 def test_load_for_inference_checks_arguments(tmp_path: Path):
     cfg = {"train": {"output_dir": str(tmp_path)}, "model": {"name": "x", "load_in_4bit": False}}
     with pytest.raises(ValueError, match="'base' or 'tuned'"):
@@ -299,3 +336,28 @@ def test_model_card_is_filled(tmp_path: Path):
     assert "{{Order Number}}" in card  # the store placeholders in the card text are left alone
     assert SYSTEM_PROMPT in card  # users need the exact training prompt
     assert "{{system_prompt}}" not in card
+
+
+def test_model_card_shows_the_data_steps_and_the_examples_training_really_used(tmp_path: Path):
+    cfg = load_config("configs/qwen3_4b_qlora.yaml")
+    cfg["data"]["out_dir"] = str(tmp_path / "data")
+    cfg["train"]["output_dir"] = str(tmp_path / "lora")
+    stats = {"raw": 26872, "after_length_filter": 26872, "after_dedupe": 24072, "train": 19257}
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "stats.json").write_text(json.dumps({**stats, "n_intents": 27}), encoding="utf-8")
+    card = export.render_model_card(cfg, tmp_path)
+    assert "| Bitext dataset | 26,872 |" in card
+    assert "| After removing repeated questions | 24,072 |" in card
+    assert "| Train / validation / test | 19,257 / n/a / n/a |" in card  # unknown counts say so
+    assert "| Training examples | 19,257 |" in card
+    assert "held-out test questions" in card
+    # train.max_train_samples capped the run: the card must say what training really used.
+    (tmp_path / "lora").mkdir()
+    (tmp_path / "lora" / "training_summary.json").write_text('{"train_examples": 5000}', encoding="utf-8")
+    cfg["eval"]["split"] = "validation"
+    card = export.render_model_card(cfg, tmp_path)
+    assert "| Training examples | 5,000 |" in card
+    assert "held-out validation questions" in card
+    assert "{{rows_" not in card
+    assert "{{train_examples}}" not in card
+    assert "{{eval_split}}" not in card

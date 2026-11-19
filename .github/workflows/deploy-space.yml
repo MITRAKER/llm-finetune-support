@@ -20,11 +20,11 @@ concurrency:
 jobs:
   deploy:
     name: Deploy to Hugging Face Spaces
-    # Only deploy code that passed CI after a push to this repository's main branch (or a
-    # manual run). The extra checks stop a pull request from a fork whose branch happens
-    # to be called "main" from triggering a deploy that can read the HF_TOKEN secret.
+    # Only deploy code that passed CI after a push to this repository's main branch, or a
+    # manual run on main. The extra checks stop a pull request from a fork whose branch
+    # happens to be called "main" from triggering a deploy that can read the HF_TOKEN secret.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)

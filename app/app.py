@@ -4,7 +4,7 @@ Runs on a free Hugging Face Space (CPU only). The model is the 4-bit GGUF
 export from step 5, served by llama.cpp, which is fast enough on a CPU for a
 3-4B model.
 
-The model writes placeholders such as {{Customer Support Phone Number}}
+The model is trained to write placeholders such as {{Customer Support Phone Number}}
 instead of inventing details. A real deployment fills them from the store's
 own systems; this demo fills a few from STORE_DETAILS below (obviously fake
 values) and shows the rest in [brackets].
@@ -159,7 +159,8 @@ def build_demo() -> Any:  # pragma: no cover - UI wiring
         title="Customer support assistant (fine-tuned Qwen3-4B)",
         description=(
             "A small open model fine-tuned with QLoRA on the Bitext customer-support dataset. "
-            "Details such as phone numbers are placeholders filled by the app, not invented by the model. "
+            "It is trained to write placeholders for store details such as phone numbers, and the app "
+            "fills them in. It can still make a detail up, so do not rely on any number it gives. "
             "Demo only: no real orders or accounts."
         ),
         examples=EXAMPLES,

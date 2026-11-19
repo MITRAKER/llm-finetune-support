@@ -99,17 +99,41 @@ def push_settings(cfg: dict[str, Any]) -> tuple[str, str]:
     return repo, token
 
 
+def read_json_or_empty(path: Path) -> dict[str, Any]:
+    """A JSON file as a dict, or {} when the step that writes it has not run yet."""
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def count_text(value: Any) -> str:
+    """A row count for the model card, such as "19,257", or "n/a" when it is unknown."""
+    return f"{value:,}" if isinstance(value, int) else "n/a"
+
+
+def data_card(cfg: dict[str, Any]) -> dict[str, str]:
+    """Row counts for the model card: what data cleaning removed, and what training used.
+
+    stats.json (step 1) has the count after each cleaning step and each split.
+    training_summary.json (step 3) has the number of examples training really used,
+    which is smaller than the train split when train.max_train_samples is set.
+    """
+    stats = read_json_or_empty(Path(cfg["data"]["out_dir"]) / "stats.json")
+    summary = read_json_or_empty(Path(cfg["train"]["output_dir"]) / "training_summary.json")
+    keys = ["raw", "after_length_filter", "after_dedupe", "train", "validation", "test", "n_intents"]
+    values = {f"rows_{key}": count_text(stats.get(key)) for key in keys}
+    values["train_examples"] = count_text(summary.get("train_examples", stats.get("train")))
+    return values
+
+
 def render_model_card(cfg: dict[str, Any], results_dir: str | Path, template: Path = MODEL_CARD_TEMPLATE) -> str:
-    """Fill the model card template with the config and the evaluation report."""
+    """Fill the model card template with the config, the data counts and the evaluation report."""
     report_path = Path(results_dir) / "REPORT.md"
     report = report_path.read_text(encoding="utf-8") if report_path.exists() else "_Evaluation not run yet._"
-    stats_path = Path(cfg["data"]["out_dir"]) / "stats.json"
-    stats = json.loads(stats_path.read_text(encoding="utf-8")) if stats_path.exists() else {}
     values = {
+        **data_card(cfg),
         "base_model": cfg["model"]["name"],
         "hub_model_id": cfg["export"]["hub_model_id"] or "local",
         "dataset": cfg["data"]["source"],
-        "train_examples": str(stats.get("train", "n/a")),
+        "eval_split": str(cfg["eval"].get("split", "test")),
         "lora_r": str(cfg["lora"]["r"]),
         "lora_alpha": str(cfg["lora"]["alpha"]),
         "learning_rate": str(cfg["train"]["learning_rate"]),

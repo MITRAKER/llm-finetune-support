@@ -6,7 +6,8 @@ review and hard to break. Ruff and mypy already enforce several of them (see
 docs/CODING_STANDARD.md); this script checks the ones no off-the-shelf linter
 covers:
 
-  P10-1  no recursion (simple, analyzable control flow)
+  P10-1  no recursion, direct (f calls f) or indirect (f calls g, g calls f) within
+         one module (simple, analyzable control flow)
   P10-2  no unbounded loops such as `while True:`
   P10-4  functions no longer than 60 lines (one printed page)
   P10-6  no `global` / `nonlocal` and no mutable module-level variables
@@ -79,6 +80,72 @@ def _calls_itself(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int | None:
     return None
 
 
+def _module_functions(tree: ast.Module) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """The module's top-level functions and the methods of its top-level classes ("Class.method")."""
+    found: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            found[node.name] = node
+        elif isinstance(node, ast.ClassDef):
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    found[f"{node.name}.{item.name}"] = item
+    return found
+
+
+def _callees(name: str, node: ast.FunctionDef | ast.AsyncFunctionDef, known: set[str]) -> set[str]:
+    """The module's own functions that this function calls directly (itself excluded)."""
+    owner = name.rpartition(".")[0]
+    called: set[str] = set()
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call):
+            continue
+        func = child.func
+        if isinstance(func, ast.Name):
+            called.add(func.id)
+        elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in {"self", "cls"}:
+            called.add(f"{owner}.{func.attr}")
+    return (called & known) - {name}
+
+
+def _path_back(graph: dict[str, set[str]], start: str) -> list[str] | None:
+    """A call path from start back to start through other functions, if one exists.
+
+    Breadth-first search without recursion; every round adds at least one new
+    function or stops, so it runs at most len(graph) rounds (rule P10-2).
+    """
+    parent: dict[str, str] = {callee: start for callee in graph[start]}
+    frontier = set(parent)
+    for _ in range(len(graph)):
+        if start in parent:
+            break
+        nxt = {c for f in frontier for c in graph[f] if c not in parent}
+        for f in sorted(frontier):
+            for c in sorted(graph[f]):
+                parent.setdefault(c, f)
+        frontier = nxt
+        if not frontier:
+            break
+    if start not in parent:
+        return None
+    path = [start]
+    for _ in range(len(graph)):
+        path.append(parent[path[-1]])
+        if path[-1] == start:
+            break
+    return list(reversed(path))
+
+
+def _check_call_cycles(tree: ast.Module, path: str) -> Iterator[Violation]:
+    """Indirect recursion: functions of one module that call each other in a cycle."""
+    functions = _module_functions(tree)
+    graph = {name: _callees(name, node, set(functions)) for name, node in functions.items()}
+    for name, node in functions.items():
+        cycle = _path_back(graph, name)
+        if cycle is not None:
+            yield Violation(path, node.lineno, "P10-1", f"function '{name}' calls itself through {' -> '.join(cycle)}")
+
+
 def _check_functions(tree: ast.Module, path: str) -> Iterator[Violation]:
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -124,7 +191,12 @@ def _check_module_state(tree: ast.Module, path: str) -> Iterator[Violation]:
 def check_source(source: str, path: str = "<string>") -> list[Violation]:
     """Run every rule on one file's source code."""
     tree = ast.parse(source, filename=path)
-    found = [*_check_functions(tree, path), *_check_statements(tree, path), *_check_module_state(tree, path)]
+    found = [
+        *_check_functions(tree, path),
+        *_check_call_cycles(tree, path),
+        *_check_statements(tree, path),
+        *_check_module_state(tree, path),
+    ]
     return sorted(found, key=lambda v: (v.path, v.line, v.rule))
 
 

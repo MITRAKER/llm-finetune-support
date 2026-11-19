@@ -8,7 +8,7 @@ is the fastest way to understand it.
 | Step | What you learn | Code |
 |---|---|---|
 | 0 | What fine-tuning is, LoRA and QLoRA, choosing the model and the GPU | `configs/qwen3_4b_qlora.yaml` |
-| 1 | Turning a raw dataset into clean, leak-free training examples | `src/prepare_data.py`, `src/common.py` |
+| 1 | Turning a raw dataset into clean, deduplicated training examples, and what data leakage is | `src/prepare_data.py`, `src/common.py` |
 | 2 | Measuring a model fairly: baseline, metrics, an LLM judge | `src/evaluate.py`, `src/metrics.py`, `src/judge.py` |
 | 3 | Training with QLoRA: hyperparameters, precision, loss curves | `src/train.py` |
 | 4 | Quality gates, the retrain loop and error analysis | `src/evaluate.py --compare` |
@@ -160,12 +160,19 @@ but repetitive. Keep that in mind when reading the results.
    collapse. The model should not spend capacity on formatting noise.
 3. **Filter by length** (`clean`): drop empty or tiny rows, and very long answers
    that cost memory and are often low quality. The thresholds are in the config.
-4. **Deduplicate** (`dedupe_key`): synthetic data repeats near-identical questions.
+4. **Deduplicate** (`dedupe_key`): synthetic data repeats questions.
    "Cancel my order!" and "cancel   my order" become the same key and only the
    first is kept. Duplicates cause two problems: the model memorizes them
    (overfitting), and a question that is in both train and test inflates the test
    score. That second problem is **data leakage**, and it is why deduplication
-   happens **before** the split.
+   happens **before** the split. It removes exact repeats only:
+   "i need assistance with canceling order {{Order Number}}" and "need assistance
+   with canceling order {{Order Number}}" get different keys, so one can land in
+   train and the other in test. In this dataset about a quarter of the evaluated
+   test questions have such a near-twin in train, so read the test scores as
+   "questions like the training ones", not "brand-new questions". Grouping
+   near-duplicates (for example by character n-gram similarity) and splitting by
+   group would remove this.
 5. **Stratified split, 80/10/10** (`split`):
    - *train*: what the model learns from;
    - *validation*: checked during training to catch overfitting and pick the best checkpoint;
@@ -184,8 +191,10 @@ but repetitive. Keep that in mind when reading the results.
 
    Splitting prompt and completion lets the trainer compute the loss on the answer
    only (step 3).
-7. **Record what happened**: `stats.json` holds the row count after every step,
-   which becomes the data card in the model card.
+7. **Record what happened**: `stats.json` holds the row count after every step
+   (raw, after the length filter, after deduplication, each split) and the number
+   of intents. The export step turns it into the data table of the model card, so
+   anyone can see what cleaning removed.
 
 ### The system prompt (`src/common.py`)
 
@@ -308,7 +317,10 @@ evaluated model; `claude-haiku-5-5` costs a few cents.
 
 - Open `results/base_predictions.jsonl` and find three replies with invented
   details. Would a customer notice?
-- In a Python shell: `from metrics import invented_details; invented_details("Call 1-800-555-0199")`.
+- From the repository root:
+  `PYTHONPATH=src python -c "from metrics import invented_details; print(invented_details('Call 1-800-555-0199'))"`.
+  The scripts in `src/` import each other by name, so Python must be told to look in
+  `src/` (pytest does this through `pythonpath` in `pyproject.toml`).
 
 ---
 
@@ -345,7 +357,7 @@ in the prompt part must be ignored (-100) and every answer token must be learned
 | batch size x accumulation | 8 x 2 = 16 | Gradient accumulation adds up gradients over 2 small batches before one update: the effect of batch 16 with the memory of batch 8 |
 | `num_train_epochs` | 1 | One pass over about 20,000 examples is enough for a narrow task; more risks memorizing the templated answers |
 | `max_length` | 1024 tokens | Covers system prompt, question and answer; longer examples are truncated |
-| `optim` | `adamw_8bit` | AdamW keeps two running averages per trainable weight; storing them in 8 bits saves memory |
+| `optim` | `adamw_8bit` | AdamW keeps two running averages per trainable weight. With LoRA that is only 33 million weights (about 264 MB in 32-bit), so 8-bit storage saves about 0.2 GB here; it matters far more in full fine-tuning |
 | `weight_decay` | 0.01 | A mild pull toward small weights, against overfitting |
 | LoRA `r` / `alpha` / `dropout` | 16 / 16 / 0 | See step 0; dropout 0 is Unsloth's fast path and fine for one epoch |
 
@@ -353,8 +365,12 @@ in the prompt part must be ignored (-100) and every answer token must be learned
 
 Training uses 16-bit floating point for speed and memory. There are two kinds:
 
-- **fp16** has more precision but a small range, so very large or very small values
-  overflow. The trainer uses **loss scaling** to stay in range.
+- **fp16** has more precision but a small range: values above 65,504 overflow to
+  infinity, and values below about 0.00000006 underflow to zero, which is what
+  happens to many small gradients. The trainer therefore uses **loss scaling**: it
+  multiplies the loss by a large factor so small gradients stay representable,
+  divides the gradients back before the update, and when a step overflows it skips
+  that step and lowers the factor.
 - **bf16** has the same range as 32-bit floats but less precision. More stable, but
   only fast on Ampere and newer GPUs (compute capability 8.0+, such as A100, L4,
   RTX 30xx).
@@ -370,7 +386,10 @@ directly. Mixing them up either crashes or makes training several times slower.
 - **Gradient checkpointing**: instead of keeping every layer's activations for the
   backward pass, recompute them when needed. Slower per step, far less memory.
   Unsloth's version also offloads them to CPU RAM.
-- **8-bit optimizer** states, above.
+- **8-bit optimizer** states, above: a small saving here (about 0.2 GB), because only
+  the adapter is trained. For an out-of-memory error, try a smaller batch size or a
+  shorter `max_length` first: they shrink the activations, which grow with every
+  token in the batch.
 
 ### Reading the loss curves
 
@@ -444,10 +463,14 @@ never confuse it with a typo.
    capacity (higher `r`).
 4. **Change one thing at a time**, in a new config file, and compare the reports.
 
-One caution: if you retrain many times while looking at the *test* scores, you
-slowly tune the model to the test set and the score stops meaning "new questions".
-Make decisions with the validation loss and the predictions, and treat the test
-score as the final exam.
+One caution: by default the gates and `results/tuned_predictions.jsonl` use the
+*test* set. Each time you change the config because of them and retrain, you tune
+the model a little to those test questions, and the score stops meaning "new
+questions". So while you iterate, set `eval.split: validation` in your config (or
+pass `--split validation`): the gates and the error analysis then use validation
+questions, which the model is never trained on. When you are done, evaluate both
+models once more with `eval.split: test` and report those numbers: the test set is
+the final exam. `--compare` refuses to compare runs made on different splits.
 
 ### Try it yourself
 
@@ -532,9 +555,10 @@ already wrote, without exporting again.
 ### Continuous deployment
 
 `.github/workflows/deploy-space.yml` publishes `app/` to the Space after CI passes on
-`main`, using `tools/deploy_space.py`. The token stays in GitHub's secret store. The
-workflow only runs for pushes to this repository's own `main` branch, so a pull
-request from someone else can never reach the token.
+a push to `main`, using `tools/deploy_space.py`. You can also start it by hand from
+the Actions tab, and it then runs only on `main`. The token stays in GitHub's secret
+store. Pull requests, including those from forks, can never trigger it, so they
+never reach the token.
 
 ### Licenses
 
@@ -566,10 +590,10 @@ YAML files under `.github/workflows/`:
 
 | Workflow | When | What |
 |---|---|---|
-| `ci.yml` | every push to `main` and every pull request | lint, format, types, Power of Ten checker; unit tests on Python 3.11, 3.12 and 3.13; the CPU smoke test with an 85% coverage gate; pip-audit |
+| `ci.yml` | every push to `main` and every pull request | lint, format, types, Power of Ten checker; unit tests on Python 3.11, 3.12 and 3.13; the CPU smoke test with an 85% coverage gate; pip-audit of every requirements file |
 | `codeql.yml` | pull requests, `main`, weekly | GitHub's security analysis of the Python code and of the workflows themselves |
 | `release.yml` | a pushed tag such as `v0.1.0` | checks the tag matches `pyproject.toml`, publishes a GitHub release with the changelog notes |
-| `deploy-space.yml` | after CI passes on `main` | publishes the demo to the Hugging Face Space |
+| `deploy-space.yml` | after CI passes on `main`, or by hand on `main` | publishes the demo to the Hugging Face Space |
 
 Good habits visible in these files: `permissions: contents: read` by default (least
 privilege: a workflow only gets the rights it needs), a `concurrency` group that
@@ -612,10 +636,12 @@ and mark the CI jobs as required. Then nothing can be merged while a check is re
   Space settings hold them, and the code reads environment variables. A
   **gitleaks** pre-commit hook blocks commits that contain keys, and GitHub's secret
   scanning is a second net.
-- **pip-audit** checks the installed packages against the database of known
-  vulnerabilities. **Dependabot** opens pull requests to upgrade pinned dependencies
-  and GitHub Actions, and CI decides whether they are safe. The GPU stack is capped
-  by Unsloth, so its minor upgrades are done by hand.
+- **pip-audit** checks every requirements file against the database of known
+  vulnerabilities, and fails if the GPU pins cannot be installed together.
+  **Dependabot** opens pull requests to upgrade pinned dependencies and GitHub
+  Actions. CI tests them on the CPU only, so an upgrade of a GPU-only package also
+  needs a quick-test run on Kaggle. Unsloth caps torch, transformers, trl and
+  datasets, so their upgrades wait for a new Unsloth release.
 - **CodeQL** finds security bugs by analysing how data flows through the code.
 - **Pinned versions** in `requirements/` mean every machine runs the same libraries.
 
@@ -646,7 +672,9 @@ rules are short:
 2. Every loop has a fixed upper bound.
 3. No dynamic memory allocation after initialization.
 4. No function longer than one printed page (about 60 lines).
-5. At least two assertions per function, with a recovery action when one fails.
+5. On average at least two assertions per function. Assertions have no side effects,
+   and when one fails the code takes an explicit recovery action, such as returning
+   an error to the caller.
 6. Declare data in the smallest possible scope.
 7. Check the return value of every function and the validity of every parameter.
 8. Limit the preprocessor to simple uses.
@@ -665,13 +693,17 @@ checker, `tools/check_power_of_ten.py`. It parses each file into an **abstract
 syntax tree** (AST: the program as a tree of statements and expressions, which
 Python's `ast` module provides) and walks it looking for recursion, `while True:`,
 functions longer than 60 lines, `global`/`nonlocal`, mutable module-level variables
-and `exec`/`eval`. It follows its own rules (its file loop has a hard upper bound),
-it is unit tested, and a test runs it on the whole repository, so a violation fails CI.
+and `exec`/`eval`. For recursion it builds a **call graph** of each module (which
+function calls which) and searches it for cycles, so `ping` calling `pong` calling
+`ping` is caught too. It follows its own rules (the search runs without recursion and
+every loop has a hard upper bound), it is unit tested, and a test runs it on the
+whole repository, so a violation fails CI. Its limits are documented: it does not
+follow calls into other modules, and it trusts that UPPER_CASE names are constants.
 
 ### Try it yourself
 
-- Add a recursive function to `src/common.py` and run `make power-of-ten`. Then run
-  `git commit` and watch pre-commit stop you.
+- Add a recursive function to `src/common.py` and run `make power-of-ten`. Then try two
+  functions that call each other. Then run `git commit` and watch pre-commit stop you.
 - Open the Actions tab on GitHub after opening a pull request and click into each job.
 - Break a type hint on purpose (`def user_text(example) -> int:`) and run `mypy`.
 

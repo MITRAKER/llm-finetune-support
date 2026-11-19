@@ -16,9 +16,10 @@ customer-support questions for an online store, measured against the untuned bas
 model, gated by quality checks, exported to a 4-bit GGUF file and served by a demo
 that runs on a free CPU.
 
-The model never invents store details. Where a phone number, order number or URL
-belongs, it writes a placeholder such as `{{Order Number}}`, and the application
-fills it from real data. Invented specifics are measured and gated.
+The model is trained not to invent store details. Where a phone number, order
+number or URL belongs, it writes a placeholder such as `{{Order Number}}`, and the
+application fills it from real data. It can still slip, so how often a reply
+contains an invented detail is measured and gated.
 
 New to fine-tuning? [LEARNING.md](LEARNING.md) walks through every step: what was
 built, why, and the concepts behind it.
@@ -66,9 +67,10 @@ training run on Kaggle.
 | LLM judge: acceptable as sent (optional) | _pending_ | _pending_ | |
 | LLM judge, out-of-scope prompts: acceptable (optional) | _pending_ | _pending_ | at most 0.10 below the base model |
 
-If any gate fails, `evaluate.py --compare` exits with code 3 and lists the reasons,
-and the notebook stops before exporting: the fix is better data or hyperparameters,
-then retraining.
+If any gate fails, `evaluate.py --compare` exits with code 3 and lists the reasons.
+In a full run the notebook then skips the export: the fix is better data or
+hyperparameters, then retraining. The quick test exports anyway, to check that the
+export step works, and never uploads.
 
 ## Quick start
 
@@ -86,12 +88,13 @@ then retraining.
 ```bash
 git clone https://github.com/MITRAKER/llm-finetune-support.git && cd llm-finetune-support
 python -m venv .venv && source .venv/bin/activate
-make install   # dev tools + pre-commit hooks
-make check     # lint, format, types, Power of Ten rules, tests with coverage
+make install                            # dev tools + pre-commit hooks
+pip install -r requirements/smoke.txt   # CPU training stack for the end-to-end test
+make check                              # lint, format, types, Power of Ten rules, tests with coverage
 ```
 
 `make check` includes a real training and evaluation run of a tiny random model on
-the CPU. It needs the CPU training stack: `pip install -r requirements/smoke.txt`.
+the CPU. For the unit tests alone, `make test` needs only `make install`.
 
 ### Run the steps yourself on a CUDA machine
 
@@ -108,17 +111,22 @@ One experiment is one config file: copy it to try another model or other hyperpa
 **Data.** The [Bitext customer-support dataset](https://huggingface.co/datasets/bitext/Bitext-customer-support-llm-chatbot-training-dataset)
 has 26,872 question-answer pairs over 27 intents (cancel an order, track a refund,
 change an address, ...), with placeholders such as `{{Order Number}}`. Step 1
-normalizes the text, drops too-short and too-long rows, removes duplicate questions
-before splitting (so no question is in both train and test), and makes a stratified
-80/10/10 split by intent. Row counts after every step go to `data/processed/stats.json`.
+normalizes the text, drops too-short and too-long rows, removes questions that are
+identical after lowercasing and removing punctuation (before splitting, so no exact
+repeat is in both train and test), and makes a stratified 80/10/10 split by intent.
+Row counts after every step go to `data/processed/stats.json`. Because the dataset was
+generated from templates, close paraphrases still end up in both splits: about a
+quarter of the evaluated test questions differ from a training question only by a
+word or the word order.
 
 **Model and method.** Qwen3-4B-Instruct-2507 (Apache 2.0) is loaded in 4-bit NF4 and
 frozen; LoRA adapters of rank 16 on every attention and MLP projection are trained:
 about 33 million weights, under 1% of the model. The loss is computed on the
-assistant's answer only. On a
-T4 training runs in fp16 (the T4 has no fast bf16), with Unsloth's gradient
-checkpointing and an 8-bit optimizer to fit in 15 GB. The best checkpoint by
-validation loss is kept.
+assistant's answer only. On a T4 training runs in fp16 (the T4 has no fast bf16).
+It fits in 15 GB mainly thanks to the 4-bit base model (about 2.5 GB instead of 8)
+and Unsloth's gradient checkpointing; the 8-bit optimizer saves only about 0.2 GB
+here, because LoRA trains just 33 million weights. The best checkpoint by validation
+loss is kept.
 
 **Evaluation.** The base model gets exactly the same system prompt, placeholder
 instruction included, so the comparison measures the training and not a better
@@ -149,23 +157,25 @@ and fills placeholders from the store's own details.
 | Practice | How |
 |---|---|
 | Continuous integration | Every pull request runs lint, format, type checks, the Power of Ten checker, unit tests on Python 3.11 to 3.13, an end-to-end smoke test that trains a tiny model on the CPU, and a coverage gate of 85% ([ci.yml](.github/workflows/ci.yml)) |
-| Coding standard | NASA/JPL "Power of Ten" rules adapted to Python, each one enforced by a tool ([docs/CODING_STANDARD.md](docs/CODING_STANDARD.md)) |
+| Coding standard | NASA/JPL "Power of Ten" rules adapted to Python, each one enforced by a tool or by code review ([docs/CODING_STANDARD.md](docs/CODING_STANDARD.md)) |
 | Zero warnings | Any warning fails the tests; ruff and mypy must report nothing |
 | Security | CodeQL, pip-audit, ruff's bandit rules, gitleaks in pre-commit, least-privilege workflow permissions, secrets only in secret stores |
-| Dependencies | Pinned in `requirements/`, upgraded through Dependabot pull requests that CI must pass |
+| Dependencies | Pinned in `requirements/` and audited with pip-audit; Dependabot pull requests must pass CI, and those that touch the GPU stack also need a quick-test run on Kaggle |
 | Releases | Semantic versioning, [CHANGELOG.md](CHANGELOG.md), and a tag such as `v0.1.0` publishes a GitHub release ([release.yml](.github/workflows/release.yml)) |
 | Continuous deployment | After CI passes on `main`, the demo is published to the Hugging Face Space ([deploy-space.yml](.github/workflows/deploy-space.yml)) |
 | Reproducibility | One config per experiment, fixed seeds, pinned versions, and the library versions and git commit saved next to every trained adapter |
 
 ## Deploy the demo
 
-1. Run the notebook with `HUB_MODEL_ID` set, so the GGUF file is uploaded to
-   `<HUB_MODEL_ID>-GGUF` on the Hugging Face Hub.
+1. Run the notebook with `QUICK_TEST = False`, `HUB_MODEL_ID` set and the `HF_TOKEN`
+   secret (write access) attached. If the quality gates pass, the GGUF file is
+   uploaded to `<HUB_MODEL_ID>-GGUF` on the Hugging Face Hub. The quick test never
+   uploads.
 2. In this GitHub repository, under **Settings > Secrets and variables > Actions**, add
    the secret `HF_TOKEN` (write access) and the variables `HF_SPACE_ID` (for example
    `your-name/support-bot`) and `HF_MODEL_REPO` (`<HUB_MODEL_ID>-GGUF`).
-3. Run the **Deploy demo** workflow (or push to `main`). It creates the Space if
-   needed and uploads `app/`.
+3. Run the **Deploy demo** workflow on `main` from the Actions tab (or push to
+   `main`). It creates the Space if needed and uploads `app/`.
 
 ## Cost
 
@@ -194,6 +204,9 @@ LEARNING.md     the step-by-step lesson
 
 - The training data is synthetic and English-only, so the model is strongest on
   common, single-intent requests in English.
+- The test questions come from the same templates as the training questions, and
+  many are close paraphrases of one, so the scores measure performance on questions
+  like the training ones. Real customers' wording will be harder.
 - The automatic metrics are proxies: ROUGE-L rewards wording overlap, and the intent
   classifier only checks the topic. That is why the LLM judge and a manual read of
   `results/*_predictions.jsonl` are part of the evaluation.

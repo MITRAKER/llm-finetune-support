@@ -3,7 +3,7 @@
 PYTHON ?= python
 CONFIG ?= configs/qwen3_4b_qlora.yaml
 
-.PHONY: help install install-train lint format typecheck power-of-ten test smoke check data baseline train evaluate compare export
+.PHONY: help install install-train lint format typecheck power-of-ten test smoke smoke-stack check data baseline train evaluate compare export
 
 help: ## Show this help
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-15s %s\n", $$1, $$2}'
@@ -31,12 +31,16 @@ power-of-ten: ## NASA/JPL Power of Ten rules, adapted to Python
 test: ## Fast unit tests
 	$(PYTHON) -m pytest -m "not slow"
 
-smoke: ## All tests including the CPU training run, with coverage (needs requirements/smoke.txt)
+smoke: smoke-stack ## All tests including the CPU training run, with coverage
 	TRITON_INTERPRET=1 $(PYTHON) -m pytest --cov --cov-report=term --cov-fail-under=85
 
-check: lint typecheck power-of-ten ## Everything CI checks
+check: lint typecheck power-of-ten smoke-stack ## Lint, format, types, rules and every test with coverage
 	ruff format --check .
 	TRITON_INTERPRET=1 $(PYTHON) -m pytest --cov --cov-report=term --cov-fail-under=85
+
+smoke-stack: # the end-to-end test trains a tiny model: without torch it is skipped and coverage fails
+	@$(PYTHON) -c "import torch, transformers, trl, peft, datasets" 2>/dev/null || \
+		{ echo "This needs the CPU training stack: pip install -r requirements/smoke.txt"; exit 1; }
 
 data: ## Step 1: prepare the data
 	$(PYTHON) src/prepare_data.py --config $(CONFIG)

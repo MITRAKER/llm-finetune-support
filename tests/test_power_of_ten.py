@@ -33,6 +33,16 @@ def test_recursion_is_flagged():
     assert rules("class A:\n    def g(self):\n        return self.g()\n") == ["P10-1"]
 
 
+def test_indirect_recursion_is_flagged_with_the_cycle():
+    found = check_source("def ping(n):\n    return pong(n)\n\ndef pong(n):\n    return ping(n - 1)\n")
+    assert [(v.line, v.rule) for v in found] == [(1, "P10-1"), (4, "P10-1")]
+    assert "ping -> pong -> ping" in found[0].message
+    methods = "class A:\n    def f(self):\n        return self.g()\n    def g(self):\n        return self.f()\n"
+    assert rules(methods) == ["P10-1", "P10-1"]
+    # Calls that never come back are fine, however deep they go.
+    assert rules("def a():\n    b()\n    c()\n\ndef b():\n    c()\n\ndef c():\n    return 1\n") == []
+
+
 def test_unbounded_loop_is_flagged_but_bounded_while_is_allowed():
     assert rules("while True:\n    pass\n") == ["P10-2"]
     assert rules("i = 0\nwhile i < 10:\n    i += 1\n") == []

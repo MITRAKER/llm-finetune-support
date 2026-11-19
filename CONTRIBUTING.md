@@ -16,8 +16,8 @@ make install          # dev tools + pre-commit hooks
 make test             # fast unit tests
 ```
 
-For the end-to-end smoke test (about two minutes on a laptop) install the CPU
-training stack too: `pip install -r requirements/smoke.txt`, then `make smoke`.
+For the end-to-end smoke test (about two minutes on a laptop), and for `make check`,
+install the CPU training stack too: `pip install -r requirements/smoke.txt`.
 
 Training itself needs a GPU. The easiest way is the Kaggle notebook in
 `notebooks/kaggle_pipeline.ipynb`; see the README.
@@ -27,7 +27,9 @@ Training itself needs a GPU. The easiest way is the Kaggle notebook in
 1. Open an issue first for anything bigger than a small fix, so we can agree on the approach.
 2. Create a branch from `main`: `git switch -c fix/short-description`.
 3. Make the change with tests. Keep functions short and simple (see below).
-4. Run `make check`. The pre-commit hooks also run on every `git commit`.
+4. Run `make check`. It needs the CPU training stack (`pip install -r requirements/smoke.txt`):
+   it trains a tiny model, and without it the coverage gate fails. The pre-commit hooks
+   also run on every `git commit`.
 5. Add a line to `CHANGELOG.md` under "Unreleased".
 6. Open a pull request. The template asks what changed, why, and how you tested it.
 
@@ -38,7 +40,7 @@ CI runs on every pull request and must be green before merging:
 | Lint | ruff (style, likely bugs, complexity, security rules), ruff format, mypy types, the Power of Ten checker |
 | Unit tests | the fast tests on Python 3.11, 3.12 and 3.13 |
 | Smoke test | every test, including a real training and evaluation run of a tiny model, with at least 85% coverage |
-| Audit | pip-audit: known vulnerabilities in the pinned dependencies |
+| Audit | pip-audit: known vulnerabilities in every requirements file (dev, CPU smoke test, GPU training, demo app) and in the Space's Gradio version; it also fails if the GPU pins cannot be installed together |
 | CodeQL | GitHub's security analysis of the Python code and the workflows |
 
 ## Code standard
@@ -77,10 +79,15 @@ GitHub release with the notes from the changelog.
 
 ## Dependencies
 
-All versions are pinned in `requirements/` so every run uses the same libraries.
-Dependabot opens weekly pull requests for upgrades, and CI decides whether they
-are safe. The GPU stack (torch, transformers, trl, datasets, peft, accelerate) is
-capped by Unsloth, so minor upgrades of those are done by hand, together.
+Versions are pinned in `requirements/` so every run uses the same libraries. The
+exceptions are bitsandbytes and huggingface-hub in `train.txt`, which are ranges, and
+torch on the GPU, which comes from the Kaggle image. Dependabot opens weekly pull
+requests for upgrades. CI tests them on the CPU only and never runs Unsloth or
+bitsandbytes, so a pull request that changes `requirements/train.txt` also needs a
+quick-test run of the Kaggle notebook before you merge it. Unsloth 2026.11.5 caps
+torch (<2.15), transformers (<=5.17.0), trl (<=1.15.0) and datasets (<5), so their
+upgrades wait for a new Unsloth release. peft and accelerate are not capped, but
+Unsloth patches them, so their minor upgrades are also done by hand and tested on a GPU.
 
 The Space installs Gradio from `sdk_version` in `app/README.md`, which Dependabot
 cannot see. CI audits that version for known vulnerabilities; to upgrade it, change

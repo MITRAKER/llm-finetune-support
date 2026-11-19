@@ -1,5 +1,5 @@
 # Checks that run on every `git commit` (install once with: pre-commit install).
-# CI runs the same tools, so a commit that passes here passes there.
+# CI runs these tools too, plus the tests, pip-audit and CodeQL.
 # Update the pinned versions with: pre-commit autoupdate
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks

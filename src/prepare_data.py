@@ -74,9 +74,10 @@ def normalize(text: Any) -> str:
 
 
 def dedupe_key(text: str) -> str:
-    """Key under which near-identical questions collide.
+    """Key under which questions that differ only in case, punctuation or spacing collide.
 
     "Cancel my order!" and "cancel   my order" both become "cancel my order".
+    Paraphrases ("I want to cancel my order") get a different key.
     """
     text = text.lower()
     text = re.sub(r"[^a-z0-9]+", " ", text)
@@ -86,8 +87,8 @@ def dedupe_key(text: str) -> str:
 def clean(df: pd.DataFrame, cfg: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, int]]:
     """Normalize, filter by length and drop duplicate questions.
 
-    Returns the cleaned frame and the row count after each step, so the data
-    card in the README can show exactly what was removed and why.
+    Returns the cleaned frame and the row count after each step. They go to
+    stats.json and into the model card, so anyone can see what was removed and why.
     """
     stats: dict[str, int] = {"raw": len(df)}
 
@@ -105,7 +106,8 @@ def clean(df: pd.DataFrame, cfg: dict[str, Any]) -> tuple[pd.DataFrame, dict[str
     stats["after_length_filter"] = len(df)
 
     # Deduplicate on the normalized question. Done BEFORE splitting, so the same
-    # question can never end up in both train and test (that would be leakage).
+    # question (up to case, punctuation and spacing) never ends up in both train
+    # and test: that would be leakage. Close paraphrases still can.
     df = df.assign(_key=df["instruction"].map(dedupe_key))
     df = df.drop_duplicates(subset="_key", keep="first").drop(columns="_key")
     stats["after_dedupe"] = len(df)

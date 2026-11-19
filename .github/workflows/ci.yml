@@ -98,17 +98,26 @@ jobs:
           python-version: "3.12"
       - name: Install pip-audit
         run: pip install pip-audit==2.10.1
+      # pip-audit resolves each file with pip, so it also audits every indirect dependency.
       - name: Audit the pipeline and dev dependencies
         run: pip-audit --progress-spinner off -r requirements/dev.txt
+      - name: Audit the training stack (CPU smoke test and GPU)
+        # This also fails when the GPU pins cannot be installed together, for example after
+        # a Dependabot bump above what Unsloth allows. datasets 4.8.5 and fsspec 2026.2.0
+        # have advisories whose fixes Unsloth's datasets<5 cap blocks, and the pipeline does
+        # not use the affected code. See SECURITY.md; remove the exceptions after upgrading.
+        run: |
+          pip-audit --progress-spinner off -r requirements/smoke.txt --ignore-vuln PYSEC-2026-3716 --ignore-vuln PYSEC-2026-4217
+          pip-audit --progress-spinner off -r requirements/train.txt --ignore-vuln PYSEC-2026-3716 --ignore-vuln PYSEC-2026-4217
       - name: Audit the demo app dependencies
         # diskcache, pulled in by llama-cpp-python, has an advisory with no fixed version
         # yet (CVE-2025-69872: code execution for someone who can already write to the
         # cache folder). The app never uses llama-cpp-python's disk cache, so it is not
         # exposed. See SECURITY.md; remove the exception once a fix is released.
-        run: pip-audit --progress-spinner off --no-deps -r app/requirements.txt --ignore-vuln PYSEC-2026-2447
+        run: pip-audit --progress-spinner off -r app/requirements.txt --ignore-vuln PYSEC-2026-2447
       - name: Audit the Gradio version the Space runs
         # The Space installs Gradio from sdk_version in app/README.md, not from a requirements
         # file, so Dependabot cannot see it: audit it here, and bump it by hand.
         run: |
           printf 'gradio==%s\n' "$(sed -n 's/^sdk_version: //p' app/README.md)" > "$RUNNER_TEMP/space-sdk.txt"
-          pip-audit --progress-spinner off --no-deps -r "$RUNNER_TEMP/space-sdk.txt"
+          pip-audit --progress-spinner off -r "$RUNNER_TEMP/space-sdk.txt"

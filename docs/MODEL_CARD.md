@@ -27,14 +27,16 @@ Code, data pipeline and evaluation: https://github.com/MITRAKER/llm-finetune-sup
 ## How it answers: placeholders instead of made-up details
 
 The model does not know your store's phone number, website or order numbers, and
-it must not invent them. Where a store-specific detail belongs, it writes a
-placeholder in double curly braces, for example:
+it must not invent them. Where a store-specific detail belongs, it is trained to
+write a placeholder in double curly braces, for example:
 
 > I'm sorry about the delay with order {{Order Number}}. You can reach our team at
 > {{Customer Support Phone Number}} during {{Customer Support Hours}}.
 
 Your application fills these placeholders from its own systems before showing the
 reply. The demo app in the repository shows how (`fill_placeholders` in `app/app.py`).
+The model can still make a detail up now and then; the evaluation below measures how
+often.
 
 ## Training
 
@@ -50,6 +52,22 @@ reply. The demo app in the repository shows how (`fill_placeholders` in `app/app
 | Loss | on the assistant's answer only (completion-only loss) |
 | Export | GGUF, `{{quantization}}` |
 
+### Data
+
+| Step | Rows |
+|---|---|
+| Bitext dataset | {{rows_raw}} |
+| After the length filter | {{rows_after_length_filter}} |
+| After removing repeated questions | {{rows_after_dedupe}} |
+| Train / validation / test | {{rows_train}} / {{rows_validation}} / {{rows_test}} |
+| Intents | {{rows_n_intents}} |
+
+Repeated questions (identical after lowercasing and removing punctuation) are
+removed before the split, so none is in two splits. The dataset was generated from
+templates, though, and close paraphrases of training questions remain in the test
+split: the evaluation measures questions like the training ones, and real customers'
+wording will be harder.
+
 The model was trained with this system prompt. Use exactly the same prompt at
 inference time: the model answers best, and writes placeholders most reliably,
 with the prompt it was trained with.
@@ -61,7 +79,7 @@ with the prompt it was trained with.
 ## Evaluation
 
 These numbers were measured on the fine-tuned model in its training form (the
-4-bit NF4 base model plus the LoRA adapter), on held-out test questions and 24
+4-bit NF4 base model plus the LoRA adapter), on held-out {{eval_split}} questions and 24
 out-of-scope prompts (off-topic requests, prompt injection, requests for other
 customers' data). The GGUF file is the same adapter merged into the 16-bit base
 model and quantized to `{{quantization}}`. That conversion usually changes the
