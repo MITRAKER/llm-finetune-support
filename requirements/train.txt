@@ -1,0 +1,15 @@
+# GPU training, evaluation and export (Kaggle, Colab or any CUDA machine).
+# Do not reinstall torch: use the one the GPU image ships with.
+# unsloth 2026.11.5 requires torch<2.15, transformers<=5.17, trl<=1.15 and datasets<5,
+# so these are pinned to the newest versions it accepts, tested together.
+-r base.txt
+accelerate==1.16.0
+bitsandbytes>=0.45.5,!=0.46.0,!=0.48.0
+datasets==4.8.5
+huggingface-hub>=1.5,<2
+peft==0.21.3
+transformers==5.17.0
+trl==1.15.0
+unsloth==2026.11.5
+unsloth-zoo==2026.11.5
+wandb==0.31.0

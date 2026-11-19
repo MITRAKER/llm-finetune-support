@@ -1,0 +1,39 @@
+name: Bug report
+description: Something does not work as described
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting. Please do not paste tokens or API keys anywhere in this form.
+  - type: dropdown
+    id: step
+    attributes:
+      label: Pipeline step
+      options:
+        - 1. Data preparation
+        - 2. Baseline evaluation
+        - 3. Training
+        - 4. Tuned evaluation and quality gates
+        - 5. Export or demo app
+        - CI, tooling or documentation
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The exact command, the config you used and the full error message.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: For example "Kaggle T4, unsloth 2026.11.5" or "local CPU, Python 3.12".

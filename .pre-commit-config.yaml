@@ -1,0 +1,52 @@
+# Checks that run on every `git commit` (install once with: pre-commit install).
+# CI runs these tools too, plus the tests, pip-audit and CodeQL.
+# Update the pinned versions with: pre-commit autoupdate
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files # keeps datasets and model weights out of git
+        args: ["--maxkb=1000"]
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.5
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # Notebook outputs can hold tokens, huge logs and personal paths: commit notebooks clean.
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.9.1
+    hooks:
+      - id: nbstripout
+
+  # Blocks commits that contain API keys or tokens (HF_TOKEN, ANTHROPIC_API_KEY, ...).
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.26.0
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (type check)
+        entry: mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: power-of-ten
+        name: Power of Ten rules (NASA/JPL, adapted to Python)
+        entry: python tools/check_power_of_ten.py src tools app tests
+        language: system
+        types: [python]
+        pass_filenames: false

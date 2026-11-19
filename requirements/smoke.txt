@@ -1,0 +1,12 @@
+# CPU-only end-to-end smoke test (CI): a tiny random model runs every step of the
+# pipeline in about a minute. Same library versions as requirements/train.txt,
+# without Unsloth and bitsandbytes, which need a CUDA GPU.
+# torch from PyPI bundles triton, which TRL's loss kernel needs; on a CPU the tests
+# run it through Triton's interpreter (TRITON_INTERPRET=1, set in the Makefile and CI).
+-r dev.txt
+accelerate==1.16.0
+datasets==4.8.5
+peft==0.21.3
+torch==2.15.0
+transformers==5.17.0
+trl==1.15.0

@@ -1,0 +1,37 @@
+# Dependabot opens a pull request when a pinned dependency or a GitHub Action has
+# a new version. CI tests it on the CPU and checks that the GPU pins still install
+# together; an upgrade of a GPU-only package also needs a quick-test run on Kaggle.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directories: ["/requirements", "/app"]
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-tools:
+        patterns: ["mypy", "pip-audit", "pre-commit", "pytest*", "ruff", "types-*"]
+    ignore:
+      # The GPU training stack is capped by Unsloth (torch<2.15, transformers<=5.17.0,
+      # trl<=1.15.0, datasets<5). Upgrade these by hand, together, when a new Unsloth
+      # release supports newer versions. Patch releases are still proposed, except for
+      # transformers and trl: Unsloth caps them at the exact versions pinned here.
+      - dependency-name: accelerate
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: datasets
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: peft
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: torch
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: transformers
+      - dependency-name: trl
+      - dependency-name: unsloth
+      - dependency-name: unsloth-zoo
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
