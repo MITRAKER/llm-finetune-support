@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from functools import lru_cache
 from typing import Any
 
@@ -46,12 +46,21 @@ MODEL_FILE = os.environ.get("MODEL_FILE", "*Q4_K_M.gguf")
 # os.cpu_count() reports the host's cores inside a container, which oversubscribes a 2-vCPU Space.
 N_THREADS = int(os.environ.get("N_THREADS", "2"))
 MAX_NEW_TOKENS = 400
-# Bounded context: at most the last 3 exchanges, and at most HISTORY_CHAR_BUDGET characters
-# of them (about 4 characters per token), so the prompt plus the reply fits in CONTEXT_TOKENS.
+CONTEXT_TOKENS = 2048
+# Bounded context, in two steps. First a cheap cut by characters: at most the last 3
+# exchanges and HISTORY_CHAR_BUDGET characters of them. Then fit_to_context() counts real
+# tokens with the model's tokenizer and drops the oldest turns until the prompt leaves
+# room for a full reply. Characters alone are not enough: English takes about 4
+# characters per token, but Chinese or a list of order numbers takes 1 or 2.
 MAX_HISTORY_MESSAGES = 6
 HISTORY_CHAR_BUDGET = 3000
 MAX_MESSAGE_CHARS = 1500
-CONTEXT_TOKENS = 2048
+# Tokens the chat template adds around each message (<|im_start|>role ... <|im_end|>)
+# and before the reply, counted generously so the estimate never comes out too small.
+TEMPLATE_TOKENS_PER_MESSAGE = 8
+TEMPLATE_TOKENS_FOR_REPLY = 16
+PROMPT_TOKEN_BUDGET = CONTEXT_TOKENS - MAX_NEW_TOKENS - TEMPLATE_TOKENS_FOR_REPLY
+TOO_LONG = "Please send a shorter message: this one does not fit in the model's context window."
 BRACKETED_RE = re.compile(r"\[([A-Z][^\[\]{}]{0,60})\]")
 EXAMPLES = [
     "I want to cancel my order",
@@ -113,6 +122,29 @@ def build_messages(message: str, history: list[dict[str, Any]]) -> list[dict[str
     return [{"role": "system", "content": SYSTEM_PROMPT}, *recent_turns(history), {"role": "user", "content": message}]
 
 
+def fit_to_context(
+    messages: list[dict[str, str]], count_tokens: Callable[[str], int], budget: int = PROMPT_TOKEN_BUDGET
+) -> list[dict[str, str]]:
+    """Drop the oldest turns until the prompt fits in budget tokens.
+
+    messages is the output of build_messages(): the system prompt first, the new user
+    message last, and the earlier turns in between. count_tokens counts the tokens of one
+    text with the model's own tokenizer. Raises ValueError when even the system prompt and
+    the new message do not fit.
+    """
+    system, *turns, latest = messages
+    used = sum(count_tokens(m["content"]) + TEMPLATE_TOKENS_PER_MESSAGE for m in (system, latest))
+    if used > budget:
+        raise ValueError(TOO_LONG)
+    kept: list[dict[str, str]] = []
+    for turn in reversed(turns):
+        used += count_tokens(turn["content"]) + TEMPLATE_TOKENS_PER_MESSAGE
+        if used > budget:
+            break
+        kept.append(turn)
+    return [system, *kept[::-1], latest]
+
+
 @lru_cache(maxsize=1)
 def get_model() -> Any:  # pragma: no cover - downloads the GGUF model
     from llama_cpp import Llama
@@ -139,16 +171,20 @@ def respond(message: str, history: list[dict[str, Any]]) -> Iterator[str]:  # pr
     except (OSError, ValueError, RuntimeError, ImportError) as exc:  # download or load failed: say so, keep the UI up
         yield f"The model could not be loaded ({type(exc).__name__}). Check MODEL_REPO in the Space settings."
         return
-    stream = model.create_chat_completion(
-        messages=messages,
-        max_tokens=MAX_NEW_TOKENS,
-        temperature=0.2,
-        stream=True,
-    )
-    reply = ""
-    for chunk in stream:
-        reply += chunk["choices"][0]["delta"].get("content") or ""
-        yield fill_placeholders(reply)
+    try:
+        messages = fit_to_context(messages, lambda text: len(model.tokenize(text.encode("utf-8"), add_bos=False)))
+        stream = model.create_chat_completion(
+            messages=messages,
+            max_tokens=MAX_NEW_TOKENS,
+            temperature=0.2,
+            stream=True,
+        )
+        reply = ""
+        for chunk in stream:
+            reply += chunk["choices"][0]["delta"].get("content") or ""
+            yield fill_placeholders(reply)
+    except ValueError:  # too long for the context window: llama.cpp raises it while streaming
+        yield TOO_LONG
 
 
 def build_demo() -> Any:  # pragma: no cover - UI wiring

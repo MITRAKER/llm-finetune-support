@@ -159,10 +159,13 @@ def generate_replies(
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
-def build_classifier(data_dir: str | Path) -> metrics.IntentClassifier:
-    """Train the intent classifier on the training split's ANSWERS (it never sees test data)."""
+def classifier_training_data(data_dir: str | Path) -> tuple[list[str], list[str]]:
+    """The training split's ANSWERS and intents: what the intent classifier learns from.
+
+    It never sees the validation or test data.
+    """
     train_rows = read_jsonl(Path(data_dir) / "train.jsonl")
-    return metrics.IntentClassifier().fit([reference_text(r) for r in train_rows], [r["intent"] for r in train_rows])
+    return [reference_text(r) for r in train_rows], [r["intent"] for r in train_rows]
 
 
 @dataclass
@@ -184,10 +187,23 @@ class Scored:
     oos_details: list[dict[str, list[str]]]  # invented details in each out-of-scope reply
 
 
+def fingerprint(data: Any) -> str:
+    """A short hash of JSON data: equal data always gives an equal fingerprint."""
+    text = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def sample_fingerprint(gen: Generated) -> str:
-    """A short hash of which prompts were evaluated, so that compare() only compares like with like."""
-    ids = [str(e["id"]) for e in gen.examples] + [str(o["id"]) for o in gen.oos]
-    return hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()[:16]
+    """A hash of exactly what the model was asked and what counts as a right answer.
+
+    That is every in-domain prompt (system prompt included) with its intent and
+    reference answer, and every out-of-scope prompt as the model saw it. The ids alone
+    are not enough: they only number the rows, so after a data change the same ids
+    hold different questions.
+    """
+    examples = [[e["id"], e["intent"], e["prompt"], e["completion"]] for e in gen.examples]
+    oos = [[o["id"], build_prompt_messages(o["prompt"]), o["expected"]] for o in gen.oos]
+    return fingerprint([examples, oos])
 
 
 def run_judge(cfg: dict[str, Any], gen: Generated) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -228,7 +244,8 @@ def generate_all(cfg: dict[str, Any], which: str, backend: str, adapter_dir: str
 
 def score(cfg: dict[str, Any], which: str, gen: Generated) -> Scored:
     """Automatic metrics for the in-domain replies and the out-of-scope replies."""
-    clf = build_classifier(cfg["data"]["out_dir"])
+    train_answers, train_intents = classifier_training_data(cfg["data"]["out_dir"])
+    clf = metrics.IntentClassifier().fit(train_answers, train_intents)
     references = [reference_text(e) for e in gen.examples]
     intents = [e["intent"] for e in gen.examples]
     summary, rows = metrics.summarize(gen.replies, references, [user_text(e) for e in gen.examples], intents, clf)
@@ -236,7 +253,12 @@ def score(cfg: dict[str, Any], which: str, gen: Generated) -> Scored:
     report: dict[str, Any] = {
         "model": which,
         "split": eval_split(cfg),
+        # What compare() checks before it compares two runs: the same questions and
+        # answers, the same intent classifier (it learns from the training split, so a
+        # data change changes how intent accuracy is measured) and the same reply length.
         "sample_fingerprint": sample_fingerprint(gen),
+        "classifier_fingerprint": fingerprint([train_answers, train_intents]),
+        "max_new_tokens": cfg["eval"].get("max_new_tokens"),
         "metrics": summary.as_dict(),
         # How often the classifier recognises the intent of the reference answers of the same
         # examples: a reference point for intent accuracy, not a hard ceiling.
@@ -383,13 +405,28 @@ def comparison_table(base: dict[str, Any], tuned: dict[str, Any]) -> str:
 
 
 def check_comparable(base: dict[str, Any], tuned: dict[str, Any]) -> None:
-    """Refuse to compare runs that scored different prompts: the gains would mean nothing."""
+    """Refuse to compare runs that were not scored the same way: the gains would mean nothing."""
+    problems = []
     if base.get("sample_fingerprint") != tuned.get("sample_fingerprint"):
-        raise ValueError(
-            "The base and tuned results were scored on different prompts "
+        problems.append(
+            "they were scored on different prompts or reference answers "
             f"(base: {base['metrics']['n']} {base.get('split', 'test')} examples, "
-            f"tuned: {tuned['metrics']['n']} {tuned.get('split', 'test')} examples). "
-            "Evaluate both models with the same data, eval.split and eval.n_samples, then compare again."
+            f"tuned: {tuned['metrics']['n']} {tuned.get('split', 'test')} examples)"
+        )
+    if base.get("classifier_fingerprint") != tuned.get("classifier_fingerprint"):
+        problems.append("the intent classifier learned from a different training split")
+    if base.get("max_new_tokens") != tuned.get("max_new_tokens"):
+        problems.append(
+            f"the replies were cut at different lengths (eval.max_new_tokens: base "
+            f"{base.get('max_new_tokens')}, tuned {tuned.get('max_new_tokens')})"
+        )
+    if problems:
+        raise ValueError(
+            "The base and tuned results cannot be compared: "
+            + "; ".join(problems)
+            + ". This happens when the data or the eval settings change after the baseline. "
+            "Evaluate both models with the same data and settings (re-run step 2, the baseline, "
+            "after any data change), then compare again."
         )
 
 

@@ -3,7 +3,7 @@
 PYTHON ?= python
 CONFIG ?= configs/qwen3_4b_qlora.yaml
 
-.PHONY: help install install-train lint format typecheck power-of-ten test smoke smoke-stack check data baseline train evaluate compare export
+.PHONY: help install install-train lint format typecheck power-of-ten test smoke smoke-stack check check-fast data baseline train evaluate compare export
 
 help: ## Show this help
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-15s %s\n", $$1, $$2}'
@@ -12,8 +12,9 @@ install: ## Install the dev tools and pre-commit hooks (no GPU needed)
 	$(PYTHON) -m pip install -r requirements/dev.txt
 	pre-commit install
 
-install-train: ## Install the GPU training stack (Kaggle, Colab or a CUDA machine)
-	$(PYTHON) -m pip install -r requirements/train.txt
+install-train: ## Install the GPU training stack, with the torch build for your NVIDIA driver
+	$(PYTHON) -m pip install uv
+	$(PYTHON) -m uv pip install --python $(PYTHON) -r requirements/train.txt --torch-backend=auto
 
 lint: ## Ruff lint
 	ruff check .
@@ -34,13 +35,21 @@ test: ## Fast unit tests
 smoke: smoke-stack ## All tests including the CPU training run, with coverage
 	TRITON_INTERPRET=1 $(PYTHON) -m pytest --cov --cov-report=term --cov-fail-under=85
 
-check: lint typecheck power-of-ten smoke-stack ## Lint, format, types, rules and every test with coverage
+check: lint typecheck power-of-ten smoke-stack ## Lint, format, types, rules and every test with coverage (Linux)
 	ruff format --check .
 	TRITON_INTERPRET=1 $(PYTHON) -m pytest --cov --cov-report=term --cov-fail-under=85
+
+check-fast: lint typecheck power-of-ten ## The same without the CPU training run (works on macOS too)
+	ruff format --check .
+	$(PYTHON) -m pytest -m "not slow"
 
 smoke-stack: # the end-to-end test trains a tiny model: without torch it is skipped and coverage fails
 	@$(PYTHON) -c "import torch, transformers, trl, peft, datasets" 2>/dev/null || \
 		{ echo "This needs the CPU training stack: pip install -r requirements/smoke.txt"; exit 1; }
+	@$(PYTHON) -c "import triton" 2>/dev/null || \
+		{ echo "The end-to-end test needs Linux (or WSL2, or a Linux container): TRL's training loss"; \
+		  echo "uses Triton, which only has Linux wheels. Run 'make check-fast' here; CI runs the full check."; \
+		  exit 1; }
 
 data: ## Step 1: prepare the data
 	$(PYTHON) src/prepare_data.py --config $(CONFIG)

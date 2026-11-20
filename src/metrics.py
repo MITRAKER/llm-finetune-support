@@ -38,18 +38,23 @@ def strip_reasoning(text: str) -> str:
 # details the customer wrote in their own message may be repeated.
 DETAIL_PATTERNS: dict[str, re.Pattern[str]] = {
     "email": re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b"),
+    # A URL ends before brackets and quotes, so a link in parentheses or in Markdown,
+    # such as [track it](https://shop.example.com/track), does not keep the ")".
     "url": re.compile(
-        r"\b(?:https?://|www\.)\S+"
+        r"\b(?:https?://|www\.)[^\s<>()\[\]{}\"'`]+"
         r"|\b[\w-]+\.(?:com|net|org|io|co|shop|store|info|biz|us|uk|ca|au|de|fr|eu|app)\b",
         re.IGNORECASE,
     ),
     # Phone numbers: 1-800-555-0199, +44 20 7946 0958, (555) 123-4567, (555)123-4567,
-    # +1 555 0100 and 555-1234. Dates are masked first, so 12.05.2024 is not a phone number.
+    # +1 555 0100, and 555-1234 or 555 1234 after a word such as "call". A bare short
+    # number looks like a range ("100-1000 units", "open 900-1700"), so it needs that word.
+    # Dates are masked first, so 12.05.2024 is not a phone number.
     "phone": re.compile(
         r"(?<![\w])(?:\+?\d{1,3}[\s.-]+)?(?:\(?\d{2,4}\)?[\s.-]+){2,}\d{3,4}(?![\w])"
         r"|(?<![\w])\+\d{1,3}(?:[\s.-]\d{2,4}){2,}(?![\w])"
         r"|\(\d{3}\)\d{3}[\s.-]?\d{4}(?![\w])"
-        r"|(?<![\w.-])\d{3}[.-]\d{4}(?![\w-]|\.\d)"
+        r"|(?i:\b(?:call|phone|telephone|tel|dial|text|sms|fax|hotline|helpline|line|number|contact|reach)\b)"
+        r"\D{0,20}?(?<![\w.-])(?P<detail>\d{3}[\s.-]\d{4})(?![\w-]|[\s.-]\d)"
     ),
     # Order / tracking numbers: 5+ digits in a row, optionally after "#".
     "long_number": re.compile(r"(?<![\w])#?\d{5,}(?![\w])"),
@@ -63,6 +68,14 @@ DETAIL_PATTERNS: dict[str, re.Pattern[str]] = {
 # Dates such as 12.05.2024, 12/05/24 or 2024-05-12 look like digit groups but are not invented details.
 DATE_RE = re.compile(r"(?<![\w.-])(?:\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2})(?![\w-]|\.\d)")
 NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+# A bare number in the customer's message is an amount only next to a money word,
+# as in "I was charged 49.99 twice"; "order 100 is missing" does not excuse "$100".
+MONEY_CUE_RE = re.compile(
+    r"[$€£]|\b(?:charged?|refund\w*|paid|pay|price\w*|costs?|fees?|total|amount|spent|bill\w*"
+    r"|usd|eur|gbp|dollars?|euros?|pounds?)\b",
+    re.IGNORECASE,
+)
+MONEY_CUE_WINDOW = 12  # characters looked at on each side of the number
 
 
 def _without_placeholders(text: str) -> str:
@@ -74,6 +87,12 @@ def _searchable(text: str) -> str:
     return DATE_RE.sub(" ", _without_placeholders(text))
 
 
+def _detail(match: re.Match[str]) -> str:
+    """The detail a pattern found, without the word ("call") that some patterns need before it."""
+    detail = match.group("detail") if "detail" in match.re.groupindex else None
+    return (detail or match.group(0)).strip()
+
+
 def _canon(kind: str, item: str) -> str:
     """A normal form, so that "$1,000" in a reply equals "1000" in the customer's message."""
     if kind in ("phone", "long_number"):
@@ -82,19 +101,43 @@ def _canon(kind: str, item: str) -> str:
         number = NUMBER_RE.search(item)
         return f"{float(number.group(0).replace(',', '')):.2f}" if number else ""
     if kind == "url":
-        return re.sub(r"^(?:https?://)?(?:www\.)?", "", item.lower()).rstrip("/.")
+        return re.sub(r"^(?:https?://)?(?:www\.)?", "", item.lower()).rstrip("/.,;:!?")
     return item.lower()
+
+
+def _same_phone(a: str, b: str) -> bool:
+    """Two phone numbers (digits only) that differ at most in the country code or the leading 0:
+    +1 555 123 4567 is 555 123 4567, and +44 20 7946 0958 is 020 7946 0958."""
+    shorter, longer = sorted((a.lstrip("0"), b.lstrip("0")), key=len)
+    return len(shorter) >= 7 and longer.endswith(shorter)
+
+
+def _given_amounts(text: str) -> set[str]:
+    """Money normal forms of the bare numbers the customer wrote next to a money word."""
+    amounts = set()
+    for number in NUMBER_RE.finditer(text):
+        around = text[max(0, number.start() - MONEY_CUE_WINDOW) : number.end() + MONEY_CUE_WINDOW]
+        if MONEY_CUE_RE.search(around):
+            amounts.add(_canon("money", number.group(0)))
+    return amounts
 
 
 def _given_details(user_message: str) -> set[str]:
     """Normal forms of the details the customer wrote. Matching is exact, never by substring:
     the customer's order 88231 does not excuse an invented refund of $88."""
     text = _searchable(user_message)
-    given = {_canon(kind, m.group(0)) for kind, pattern in DETAIL_PATTERNS.items() for m in pattern.finditer(text)}
-    for number in NUMBER_RE.findall(text):
-        given.update((_canon("long_number", number), _canon("money", number)))
+    given = {_canon(kind, _detail(m)) for kind, pattern in DETAIL_PATTERNS.items() for m in pattern.finditer(text)}
+    given.update(_canon("long_number", number) for number in NUMBER_RE.findall(text))
+    given.update(_given_amounts(text))
     given.update(re.findall(r"[\w@.+-]+", text.lower()))
     return given
+
+
+def _was_given(kind: str, canon: str, given: set[str]) -> bool:
+    """Whether the customer wrote this detail (a phone number may gain or lose its country code)."""
+    if canon in given:
+        return True
+    return kind == "phone" and any(g.isdigit() and _same_phone(canon, g) for g in given)
 
 
 def invented_details(response: str, user_message: str = "") -> dict[str, list[str]]:
@@ -103,8 +146,8 @@ def invented_details(response: str, user_message: str = "") -> dict[str, list[st
     given = _given_details(user_message)
     found: dict[str, list[str]] = {}
     for kind, pattern in DETAIL_PATTERNS.items():
-        hits = [m.group(0).strip() for m in pattern.finditer(text)]
-        hits = [h for h in hits if _canon(kind, h) and _canon(kind, h) not in given]
+        hits = [_detail(m) for m in pattern.finditer(text)]
+        hits = [h for h in hits if _canon(kind, h) and not _was_given(kind, _canon(kind, h), given)]
         if hits:
             found[kind] = hits
     return found

@@ -34,7 +34,9 @@ flowchart LR
     D --> E["4. Evaluate<br/>metrics + optional LLM judge"]
     C --> F{"Quality gates"}
     E --> F
-    F -- "fail: exit code 3" --> G["Fix data or<br/>hyperparameters"] --> D
+    F -- "fail: exit code 3" --> G["Fix data or<br/>hyperparameters"]
+    G -- hyperparameters --> D
+    G -- "data (then redo 2 as well)" --> B
     F -- pass --> H["5. Export<br/>merge + GGUF q4_k_m"]
     H --> I["Hugging Face Hub<br/>adapter, GGUF, model card"]
     I --> J["Gradio demo<br/>free CPU Space"]
@@ -94,14 +96,23 @@ make check                              # lint, format, types, Power of Ten rule
 ```
 
 `make check` includes a real training and evaluation run of a tiny random model on
-the CPU. For the unit tests alone, `make test` needs only `make install`.
+the CPU. That run needs Linux (WSL2 or a Linux container work too): TRL's training
+loss uses Triton, which has no macOS or Windows wheels. On a Mac, run
+`make check-fast`, which does everything else and needs only `make install`; CI runs
+the full check on every pull request.
 
 ### Run the steps yourself on a CUDA machine
 
 ```bash
-pip install -r requirements/train.txt
+make install-train                                 # the GPU stack, with torch built for your driver
 make data baseline train evaluate compare export   # or run each script with --config
 ```
+
+`make install-train` installs `requirements/train.txt` with
+`uv pip install --torch-backend=auto`, as the Kaggle notebook does: uv keeps a torch
+that already fits and otherwise picks the build that matches your NVIDIA driver. A
+plain `pip install -r requirements/train.txt` can replace torch with PyPI's default
+build, which uses CUDA 13 and needs driver 580 or newer (`nvidia-smi` shows yours).
 
 Every setting lives in [`configs/qwen3_4b_qlora.yaml`](configs/qwen3_4b_qlora.yaml).
 One experiment is one config file: copy it to try another model or other hyperparameters.
@@ -115,9 +126,9 @@ normalizes the text, drops too-short and too-long rows, removes questions that a
 identical after lowercasing and removing punctuation (before splitting, so no exact
 repeat is in both train and test), and makes a stratified 80/10/10 split by intent.
 Row counts after every step go to `data/processed/stats.json`. Because the dataset was
-generated from templates, close paraphrases still end up in both splits: about a
-quarter of the evaluated test questions differ from a training question only by a
-word or the word order.
+generated from templates, close paraphrases still end up in both splits: about half
+of the evaluated test questions differ from a training question by a single word
+(often a typo) or only by the word order.
 
 **Model and method.** Qwen3-4B-Instruct-2507 (Apache 2.0) is loaded in 4-bit NF4 and
 frozen; LoRA adapters of rank 16 on every attention and MLP projection are trained:

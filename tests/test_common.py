@@ -86,6 +86,25 @@ def test_history_is_bounded_by_characters_too():
     assert [m["content"] for m in msgs[1:]] == [long_turn, "next"]  # the older turn no longer fits
 
 
+def test_history_is_trimmed_to_the_context_window_in_real_tokens():
+    """Characters are not enough: Chinese or a list of order numbers takes far more tokens per character."""
+
+    def one_token_per_character(text: str) -> int:
+        return len(text)
+
+    system = {"role": "system", "content": "s" * 100}
+    older = [{"role": "user", "content": "a" * 900}, {"role": "assistant", "content": "b" * 400}]
+    latest = {"role": "user", "content": "c" * 300}
+    messages = [system, *older, latest]
+    # The oldest turn no longer fits next to a full reply; the newer one still does.
+    assert app.fit_to_context(messages, one_token_per_character) == [system, older[1], latest]
+    assert app.fit_to_context(messages, one_token_per_character, budget=10_000) == messages
+    too_long = {"role": "user", "content": "c" * app.PROMPT_TOKEN_BUDGET}
+    with pytest.raises(ValueError, match="shorter message"):
+        app.fit_to_context([system, too_long], one_token_per_character)
+    assert app.PROMPT_TOKEN_BUDGET + app.MAX_NEW_TOKENS < app.CONTEXT_TOKENS  # room for the whole reply
+
+
 def test_restore_placeholders_undoes_fill_placeholders():
     text = "Call {{Customer Support Phone Number}} about {{Order Number}}."
     assert app.restore_placeholders(app.fill_placeholders(text)) == text

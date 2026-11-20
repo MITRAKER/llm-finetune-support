@@ -22,6 +22,7 @@ outputs/
 results/*
 !results/.gitkeep
 wandb/
+unsloth_compiled_cache/
 *.gguf
 *.safetensors
 *.bin
