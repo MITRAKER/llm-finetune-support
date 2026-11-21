@@ -124,6 +124,27 @@ def data_card(cfg: dict[str, Any]) -> dict[str, str]:
     return values
 
 
+def results_split(cfg: dict[str, Any], results_dir: str | Path) -> str:
+    """The split the saved evaluation results were measured on.
+
+    It comes from the results, not the config: --split can override the config, so the
+    two can disagree. Before any evaluation has run, it is the config's split.
+    """
+    tuned = read_json_or_empty(Path(results_dir) / "tuned_metrics.json")
+    return str(tuned.get("split", cfg["eval"].get("split", "test")))
+
+
+def split_warning(cfg: dict[str, Any]) -> str | None:
+    """A warning for --push when the results to publish are not on the test split."""
+    split = results_split(cfg, cfg["eval"]["results_dir"])
+    if split == "test":
+        return None
+    return (
+        f"Warning: the evaluation results are on the {split} split, and the model card will say so. "
+        "Before you publish final numbers, evaluate both models on the test split and compare again."
+    )
+
+
 def render_model_card(cfg: dict[str, Any], results_dir: str | Path, template: Path = MODEL_CARD_TEMPLATE) -> str:
     """Fill the model card template with the config, the data counts and the evaluation report."""
     report_path = Path(results_dir) / "REPORT.md"
@@ -133,7 +154,7 @@ def render_model_card(cfg: dict[str, Any], results_dir: str | Path, template: Pa
         "base_model": cfg["model"]["name"],
         "hub_model_id": cfg["export"]["hub_model_id"] or "local",
         "dataset": cfg["data"]["source"],
-        "eval_split": str(cfg["eval"].get("split", "test")),
+        "eval_split": results_split(cfg, results_dir),
         "lora_r": str(cfg["lora"]["r"]),
         "lora_alpha": str(cfg["lora"]["alpha"]),
         "learning_rate": str(cfg["train"]["learning_rate"]),
@@ -174,11 +195,17 @@ def export(cfg: dict[str, Any]) -> Path:  # pragma: no cover - needs a CUDA GPU
     return target
 
 
-def create_hub_repos(api: Any, repo: str) -> tuple[str, str]:  # pragma: no cover - talks to the Hub
-    """Create the adapter and GGUF repos (if needed). Run first: it fails fast on a read-only token."""
+def create_hub_repos(api: Any, repo: str) -> tuple[str, str]:
+    """Create the adapter and GGUF repos (if needed) and check that the token may write to them.
+
+    Run it before the slow export, so a read-only token fails in seconds. create_repo
+    alone does not catch it: when the repo already exists, create_repo(exist_ok=True)
+    succeeds even for a token that cannot write there, so we ask the Hub explicitly.
+    """
     adapter_repo, gguf_repo = f"{repo}-lora", f"{repo}-GGUF"
     for target in (adapter_repo, gguf_repo):
         api.create_repo(target, exist_ok=True)
+        api.auth_check(target, write=True)  # raises an HTTP error when the token cannot write
     return adapter_repo, gguf_repo
 
 
@@ -222,6 +249,9 @@ def main(argv: list[str] | None = None) -> dict[str, str]:  # pragma: no cover -
 
         repo, token = push_settings(cfg)  # before the slow export: a missing setting fails in seconds
         create_hub_repos(HfApi(token=token), repo)
+        warning = split_warning(cfg)
+        if warning:
+            print(warning)
     gguf = exported_gguf(cfg) if args.push_only else export(cfg)
     outputs = {"adapter": str(adapter_dir(cfg)), "gguf": str(gguf)}
     if args.push or args.push_only:

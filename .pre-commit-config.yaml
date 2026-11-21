@@ -1,6 +1,9 @@
 # Checks that run on every `git commit` (install once with: pre-commit install).
-# CI runs these tools too, plus the tests, pip-audit and CodeQL.
-# Update the pinned versions with: pre-commit autoupdate
+# CI runs every hook too (except gitleaks, which checks staged changes), plus the tests,
+# pip-audit and CodeQL. ruff, mypy and the Power of Ten checker run from your virtual
+# environment (activate it before you commit), so they are the versions pinned in
+# requirements/dev.txt, which CI uses and Dependabot updates. Update the other hooks'
+# pinned versions with: pre-commit autoupdate
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -17,13 +20,6 @@ repos:
       - id: mixed-line-ending
         args: ["--fix=lf"]
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.5
-    hooks:
-      - id: ruff-check
-        args: [--fix]
-      - id: ruff-format
-
   # Notebook outputs can hold tokens, huge logs and personal paths: commit notebooks clean.
   - repo: https://github.com/kynan/nbstripout
     rev: 0.9.1
@@ -38,6 +34,18 @@ repos:
 
   - repo: local
     hooks:
+      - id: ruff-check
+        name: ruff (lint)
+        entry: ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi, jupyter]
+        require_serial: true
+      - id: ruff-format
+        name: ruff (format)
+        entry: ruff format --force-exclude
+        language: system
+        types_or: [python, pyi, jupyter]
+        require_serial: true
       - id: mypy
         name: mypy (type check)
         entry: mypy

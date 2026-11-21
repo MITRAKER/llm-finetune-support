@@ -17,6 +17,8 @@ import yaml
 pytest.importorskip("torch")
 pytest.importorskip("trl")
 pytest.importorskip("peft")
+# TRL's training loss is a Triton kernel, and Triton only has Linux wheels.
+pytest.importorskip("triton", reason="TRL's training loss needs Triton, which only has Linux wheels")
 
 import evaluate
 import prepare_data

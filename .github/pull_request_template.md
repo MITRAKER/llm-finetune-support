@@ -8,7 +8,7 @@
 
 ## Checklist
 
-- [ ] `make check` passes locally (lint, format, types, Power of Ten rules, tests with coverage)
+- [ ] `make check` passes locally (lint, format, types, Power of Ten rules, tests with coverage), or `make check-fast` on macOS
 - [ ] New behaviour has tests
 - [ ] Docs updated (README.md, LEARNING.md or docs/) if behaviour or usage changed
 - [ ] CHANGELOG.md updated under "Unreleased"

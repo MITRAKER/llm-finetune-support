@@ -29,6 +29,7 @@ on code review, because no tool can check them completely.
 
 ```bash
 make check            # lint, format, types, Power of Ten and every test (CI also runs pip-audit, Python 3.11 to 3.13 and CodeQL)
+make check-fast       # the same without the CPU training run, which needs Linux
 make power-of-ten     # only the Power of Ten checker
 ```
 

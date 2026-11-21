@@ -43,6 +43,12 @@ jobs:
         run: mypy
       - name: Power of Ten rules (NASA/JPL, adapted to Python)
         run: python tools/check_power_of_ten.py src tools app tests
+      - name: Pre-commit hooks (whitespace, file formats, private keys, clean notebooks)
+        env:
+          # ruff, mypy and the Power of Ten checker ran above, and gitleaks only checks
+          # changes staged for a commit, so they are skipped here.
+          SKIP: ruff-check,ruff-format,mypy,power-of-ten,gitleaks
+        run: pre-commit run --all-files --show-diff-on-failure
 
   unit:
     name: Unit tests (Python ${{ matrix.python-version }})

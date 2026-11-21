@@ -168,9 +168,10 @@ but repetitive. Keep that in mind when reading the results.
    happens **before** the split. It removes exact repeats only:
    "i need assistance with canceling order {{Order Number}}" and "need assistance
    with canceling order {{Order Number}}" get different keys, so one can land in
-   train and the other in test. In this dataset about a quarter of the evaluated
-   test questions have such a near-twin in train, so read the test scores as
-   "questions like the training ones", not "brand-new questions". Grouping
+   train and the other in test. In this dataset about half of the evaluated test
+   questions have such a near-twin in train, differing by a single word (often a
+   typo) or only by the word order, so read the test scores as "questions like the
+   training ones", not "brand-new questions". Grouping
    near-duplicates (for example by character n-gram similarity) and splitting by
    group would remove this.
 5. **Stratified split, 80/10/10** (`split`):
@@ -440,9 +441,14 @@ applies the **quality gates** from the config:
 
 The last two gates compare with the base model instead of using a fixed threshold,
 because they ask a different question: not "is it good?" but "did training make it
-worse?". Before comparing, the script also checks that both runs scored exactly the
-same prompts (a fingerprint of their ids is saved in each metrics file), so a quick
-50-example run is never compared with a 300-example one.
+worse?". Before comparing, the script also checks that both runs were scored the
+same way. Each metrics file saves a **fingerprint** (a short hash) of every prompt,
+reference answer and intent it was scored on, one of the training answers the intent
+classifier learned from, and the reply length limit (`eval.max_new_tokens`). So a
+quick 50-example run is never compared with a 300-example one, and a baseline
+measured before a data change is never compared with a model trained after it. A
+hash of the example ids alone would not be enough: ids only number the rows, so after
+a data change the same ids hold different questions.
 
 If any gate fails, the script prints the reasons and exits with **code 3**. Exit
 codes are how programs report success to other programs: the notebook (or a CI job)
@@ -462,6 +468,10 @@ never confuse it with a typo.
    (more steps, higher rate), too much (lower rate, fewer steps), or too little
    capacity (higher `r`).
 4. **Change one thing at a time**, in a new config file, and compare the reports.
+   If the change is to the data (cleaning, the dataset version or the seed), run
+   step 1 and the baseline (step 2) again too: the test questions change, and
+   `--compare` refuses to compare the new model with a baseline scored on other
+   questions.
 
 One caution: by default the gates and `results/tuned_predictions.jsonl` use the
 *test* set. Each time you change the config because of them and retrain, you tune
@@ -528,11 +538,18 @@ with the base model, data, hyperparameters, the exact training system prompt, th
 evaluation report, intended use and limitations. A model without a card is hard to
 trust or reuse.
 
-`--push` checks the Hub settings (`export.hub_model_id` and `HF_TOKEN`) and creates
-the two repositories *before* the 20-minute export starts, so a missing setting or a
-read-only token fails in seconds instead of at the end. If the upload itself fails
-(a network error halfway through 2.5 GB), `--push-only` uploads the files the export
-already wrote, without exporting again.
+`--push` checks the Hub settings (`export.hub_model_id` and `HF_TOKEN`), creates the
+two repositories and asks the Hub whether the token may write to them, all *before*
+the 20-minute export starts, so a missing setting or a read-only token fails in
+seconds instead of at the end. The explicit check matters: when a repository already
+exists, `create_repo(..., exist_ok=True)` succeeds even for a read-only token, so only
+`auth_check(..., write=True)` catches it early. If the upload itself fails (a network
+error halfway through 2.5 GB), `--push-only` uploads the files the export already
+wrote, without exporting again.
+
+The card names the split its numbers were measured on, taken from the saved results
+(`tuned_metrics.json`) rather than from the config, because `--split` can override the
+config. `--push` warns when that split is not the test split.
 
 ### The demo app
 
@@ -541,7 +558,11 @@ already wrote, without exporting again.
 - downloads the GGUF file once and keeps it loaded (`lru_cache`);
 - sends the training system prompt plus only the last few turns (at most 6
   messages and 3,000 characters, and a new message of at most 1,500 characters),
-  so the input stays inside the context window (a bounded history);
+  then counts the real tokens with the model's tokenizer and drops the oldest turns
+  until there is room for a full reply, so the input stays inside the 2,048-token
+  context window (a bounded history). Counting characters alone is not enough:
+  English takes about 4 characters per token, but Chinese text or a list of order
+  numbers takes only 1 or 2;
 - puts the placeholders back into its own earlier replies before sending them
   again, so the model sees the format it was trained on, not the filled-in values;
 - reads the message format of the Gradio version it runs on: Gradio 6 sends earlier
@@ -590,7 +611,7 @@ YAML files under `.github/workflows/`:
 
 | Workflow | When | What |
 |---|---|---|
-| `ci.yml` | every push to `main` and every pull request | lint, format, types, Power of Ten checker; unit tests on Python 3.11, 3.12 and 3.13; the CPU smoke test with an 85% coverage gate; pip-audit of every requirements file |
+| `ci.yml` | every push to `main` and every pull request | lint, format, types, Power of Ten checker and the other pre-commit hooks; unit tests on Python 3.11, 3.12 and 3.13; the CPU smoke test with an 85% coverage gate; pip-audit of every requirements file |
 | `codeql.yml` | pull requests, `main`, weekly | GitHub's security analysis of the Python code and of the workflows themselves |
 | `release.yml` | a pushed tag such as `v0.1.0` | checks the tag matches `pyproject.toml`, publishes a GitHub release with the changelog notes |
 | `deploy-space.yml` | after CI passes on `main`, or by hand on `main` | publishes the demo to the Hugging Face Space |
@@ -641,7 +662,10 @@ and mark the CI jobs as required. Then nothing can be merged while a check is re
   **Dependabot** opens pull requests to upgrade pinned dependencies and GitHub
   Actions. CI tests them on the CPU only, so an upgrade of a GPU-only package also
   needs a quick-test run on Kaggle. Unsloth caps torch, transformers, trl and
-  datasets, so their upgrades wait for a new Unsloth release.
+  datasets, so their upgrades wait for a new Unsloth release, and so does
+  huggingface-hub 2.x, which those transformers and datasets versions refuse.
+  Dependabot only reaches the package indexes named in `.github/dependabot.yml`, so
+  the demo app's second index (prebuilt llama-cpp-python wheels) is declared there.
 - **CodeQL** finds security bugs by analysing how data flows through the code.
 - **Pinned versions** in `requirements/` mean every machine runs the same libraries.
 
@@ -650,7 +674,12 @@ and mark the CI jobs as required. Then nothing can be merged while a check is re
 `.pre-commit-config.yaml` runs the checks on your machine at every `git commit`:
 whitespace and file checks, ruff, mypy, the Power of Ten checker, `nbstripout`
 (removes notebook outputs, which can contain tokens or huge logs) and gitleaks.
-Problems are caught in seconds, before they reach CI.
+Problems are caught in seconds, before they reach CI. ruff, mypy and the checker run
+from your virtual environment, so the hooks use exactly the versions pinned in
+`requirements/dev.txt`, the same ones CI uses. A hook that installs its own copy of a
+tool drifts: Dependabot updates the pin CI uses but not the hook's, and the two
+versions start to disagree about formatting. CI also runs the other hooks on every
+pull request, so a change made without `pre-commit install` is still checked.
 
 ### Versions, changelog and releases
 

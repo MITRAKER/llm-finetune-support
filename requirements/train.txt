@@ -1,5 +1,8 @@
 # GPU training, evaluation and export (Kaggle, Colab or any CUDA machine).
-# Do not reinstall torch: use the one the GPU image ships with.
+# torch is not pinned: keep a build that matches your NVIDIA driver. Install with
+# `uv pip install -r requirements/train.txt --torch-backend=auto` (make install-train
+# and the notebook do): plain pip may swap in PyPI's default torch, a CUDA 13 build
+# that needs driver 580 or newer, when torchvision or xformers want a newer torch.
 # unsloth 2026.11.5 requires torch<2.15, transformers<=5.17, trl<=1.15 and datasets<5,
 # so these are pinned to the newest versions it accepts, tested together.
 -r base.txt

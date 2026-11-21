@@ -65,6 +65,41 @@ def test_details_the_customer_gave_may_be_repeated_in_any_format():
     assert "money" in m.invented_details("We can refund $100 now.", user_message="Refund over $10,000?")
 
 
+@pytest.mark.parametrize(
+    "text", ["Orders of 100-1000 units ship by freight.", "The warehouse is open 900-1700 on weekdays."]
+)
+def test_number_ranges_are_not_phone_numbers(text):
+    assert "phone" not in m.invented_details(text)
+
+
+def test_a_short_number_after_a_word_such_as_call_is_a_phone_number():
+    """Only the number is reported, not the word that marks it as a phone number."""
+    assert m.invented_details("Call us at 555 0199 for help.") == {"phone": ["555 0199"]}
+    assert m.invented_details("Our helpline number is 555-0199.") == {"phone": ["555-0199"]}
+
+
+def test_a_phone_number_the_customer_gave_may_gain_or_lose_its_country_code():
+    assert m.invented_details("We will call +1 555 123 4567 today.", user_message="Call me on 555-123-4567") == {}
+    assert m.invented_details("We will call +44 20 7946 0958.", user_message="call me on 020 7946 0958") == {}
+    found = m.invented_details("We will call +1 555 123 4568.", user_message="Call me on 555-123-4567")
+    assert found == {"phone": ["+1 555 123 4568"]}
+
+
+def test_a_link_ends_before_brackets_and_punctuation():
+    given = "Is https://shop.example.com/track the right page?"
+    assert m.invented_details("Yes: [track it](https://shop.example.com/track).", user_message=given) == {}
+    assert m.invented_details("Yes, https://shop.example.com/track, as you said.", user_message=given) == {}
+    found = m.invented_details("See [returns](https://shop.example.com/returns).")
+    assert found == {"url": ["https://shop.example.com/returns"]}
+
+
+def test_a_bare_number_excuses_an_amount_only_next_to_a_money_word():
+    assert m.invented_details("We will refund $100 today.", user_message="Order 100 never arrived.") == {
+        "money": ["$100"]
+    }
+    assert m.invented_details("We will refund $100 today.", user_message="I paid 100 for it.") == {}
+
+
 def test_placeholders_and_user_supplied_details_are_not_flagged():
     text = "Please call {{Customer Support Phone Number}} or visit {{Website URL}} about order 88231."
     assert m.invented_details(text, user_message="Where is order 88231?") == {}

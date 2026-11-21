@@ -17,7 +17,10 @@ make test             # fast unit tests
 ```
 
 For the end-to-end smoke test (about two minutes on a laptop), and for `make check`,
-install the CPU training stack too: `pip install -r requirements/smoke.txt`.
+install the CPU training stack too: `pip install -r requirements/smoke.txt`. The smoke
+test needs Linux (or WSL2, or a Linux container): TRL's training loss uses Triton,
+which only has Linux wheels. On macOS, run `make check-fast`, which runs every other
+check; CI runs the smoke test on every pull request.
 
 Training itself needs a GPU. The easiest way is the Kaggle notebook in
 `notebooks/kaggle_pipeline.ipynb`; see the README.
@@ -27,9 +30,10 @@ Training itself needs a GPU. The easiest way is the Kaggle notebook in
 1. Open an issue first for anything bigger than a small fix, so we can agree on the approach.
 2. Create a branch from `main`: `git switch -c fix/short-description`.
 3. Make the change with tests. Keep functions short and simple (see below).
-4. Run `make check`. It needs the CPU training stack (`pip install -r requirements/smoke.txt`):
-   it trains a tiny model, and without it the coverage gate fails. The pre-commit hooks
-   also run on every `git commit`.
+4. Run `make check`. It needs the CPU training stack (`pip install -r requirements/smoke.txt`)
+   and Linux: it trains a tiny model, and without it the coverage gate fails. On macOS,
+   run `make check-fast` and let CI run the smoke test. The pre-commit hooks also run on
+   every `git commit`.
 5. Add a line to `CHANGELOG.md` under "Unreleased".
 6. Open a pull request. The template asks what changed, why, and how you tested it.
 
@@ -37,7 +41,7 @@ CI runs on every pull request and must be green before merging:
 
 | Job | What it checks |
 |---|---|
-| Lint | ruff (style, likely bugs, complexity, security rules), ruff format, mypy types, the Power of Ten checker |
+| Lint | ruff (style, likely bugs, complexity, security rules), ruff format, mypy types, the Power of Ten checker, and the other pre-commit hooks (whitespace, file formats, private keys, clean notebooks) |
 | Unit tests | the fast tests on Python 3.11, 3.12 and 3.13 |
 | Smoke test | every test, including a real training and evaluation run of a tiny model, with at least 85% coverage |
 | Audit | pip-audit: known vulnerabilities in every requirements file (dev, CPU smoke test, GPU training, demo app) and in the Space's Gradio version; it also fails if the GPU pins cannot be installed together |
@@ -86,11 +90,16 @@ requests for upgrades. CI tests them on the CPU only and never runs Unsloth or
 bitsandbytes, so a pull request that changes `requirements/train.txt` also needs a
 quick-test run of the Kaggle notebook before you merge it. Unsloth 2026.11.5 caps
 torch (<2.15), transformers (<=5.17.0), trl (<=1.15.0) and datasets (<5), so their
-upgrades wait for a new Unsloth release. peft and accelerate are not capped, but
-Unsloth patches them, so their minor upgrades are also done by hand and tested on a GPU.
+upgrades wait for a new Unsloth release. Those transformers and datasets versions need
+huggingface-hub below 2, so Dependabot skips its 2.x releases for training (the demo
+app in `app/` is separate and already uses 2.x). peft and accelerate are not capped,
+but Unsloth patches them, so their minor upgrades are also done by hand and tested on
+a GPU.
 
 The Space installs Gradio from `sdk_version` in `app/README.md`, which Dependabot
 cannot see. CI audits that version for known vulnerabilities; to upgrade it, change
 `sdk_version` and the version in `tests/test_deploy_space.py` together.
 
-To update the pre-commit hooks: `pre-commit autoupdate`.
+The ruff, mypy and Power of Ten hooks run the tools in your virtual environment
+(activate it before you commit), so Dependabot's updates of `requirements/dev.txt`
+reach the hooks and CI together. To update the other hooks: `pre-commit autoupdate`.

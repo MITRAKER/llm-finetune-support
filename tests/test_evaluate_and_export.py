@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -168,6 +169,52 @@ def test_run_judge_reports_in_domain_and_out_of_scope_separately(tmp_path: Path,
     assert [r["id"] for r in rows] == ["t-1", "oos-1"]
 
 
+def test_fingerprint_changes_when_a_question_changes_under_the_same_id(tmp_path: Path):
+    """Ids only number the rows: after a data change the same ids hold other questions."""
+    _, gen = tiny_generation(tmp_path)
+    original = evaluate.sample_fingerprint(gen)
+    assert evaluate.sample_fingerprint(copy.deepcopy(gen)) == original  # stable
+    changes = [
+        lambda g: g.examples[0]["prompt"][0].update(content="where is my refund"),
+        lambda g: g.examples[0]["completion"][0].update(content="Refunds take a week"),
+        lambda g: g.examples[0].update(intent="cancel_order"),
+        lambda g: g.oos[0].update(prompt="write a song"),
+        lambda g: g.oos[0].update(expected="answer it"),
+    ]
+    for change in changes:
+        changed = copy.deepcopy(gen)
+        change(changed)
+        assert evaluate.sample_fingerprint(changed) != original
+
+
+def test_score_records_what_compare_checks(tmp_path: Path):
+    cfg, gen = tiny_generation(tmp_path)
+    cfg["eval"]["max_new_tokens"] = 64
+    first = evaluate.score(cfg, "base", gen).report
+    assert first["sample_fingerprint"] == evaluate.sample_fingerprint(gen)
+    assert first["max_new_tokens"] == 64
+    # The intent classifier learns from the training split, so new training data changes
+    # how intent accuracy is measured, even on the same test questions.
+    train_file = tmp_path / "data" / "train.jsonl"
+    train_file.write_text("".join(train_file.read_text(encoding="utf-8").splitlines(keepends=True)[1:]), "utf-8")
+    second = evaluate.score(cfg, "base", gen).report
+    assert second["sample_fingerprint"] == first["sample_fingerprint"]
+    assert second["classifier_fingerprint"] != first["classifier_fingerprint"]
+
+
+def test_compare_refuses_a_baseline_scored_before_the_data_or_settings_changed(tmp_path: Path):
+    cfg = {"eval": {"results_dir": str(tmp_path), "gates": GATES}}
+    base = {**report(0.7, 0.2, 0.3), "classifier_fingerprint": "old", "max_new_tokens": 256}
+    tuned = {**report(0.93, 0.45, 0.01), "classifier_fingerprint": "new", "max_new_tokens": 512}
+    (tmp_path / "base_metrics.json").write_text(json.dumps(base), encoding="utf-8")
+    (tmp_path / "tuned_metrics.json").write_text(json.dumps(tuned), encoding="utf-8")
+    with pytest.raises(ValueError, match="different training split") as refused:
+        evaluate.compare(cfg)
+    assert "eval.max_new_tokens: base 256, tuned 512" in str(refused.value)
+    assert "re-run step 2, the baseline" in str(refused.value)
+    assert not (tmp_path / "REPORT.md").exists()
+
+
 def test_load_eval_examples_validates_n(tmp_path: Path):
     (tmp_path / "test.jsonl").write_text('{"id": "a"}\n{"id": "b"}\n', encoding="utf-8")
     assert [r["id"] for r in evaluate.load_eval_examples(tmp_path, 1)] == ["a"]
@@ -318,6 +365,45 @@ def test_push_settings_are_checked_before_any_slow_work(monkeypatch: pytest.Monk
     monkeypatch.delenv("HF_TOKEN")
     with pytest.raises(ValueError, match="HF_TOKEN"):
         export.push_settings(cfg)
+
+
+def test_hub_repos_are_created_and_checked_for_write_access():
+    """create_repo(exist_ok=True) succeeds for a read-only token when the repo exists, so check explicitly."""
+    calls: list[tuple[str, str, bool]] = []
+
+    class FakeApi:
+        def create_repo(self, repo_id: str, exist_ok: bool) -> None:
+            calls.append(("create", repo_id, exist_ok))
+
+        def auth_check(self, repo_id: str, write: bool) -> None:
+            calls.append(("auth_check", repo_id, write))
+            if repo_id.endswith("-GGUF"):
+                raise PermissionError("403: the token cannot write here")
+
+    with pytest.raises(PermissionError, match="403"):
+        export.create_hub_repos(FakeApi(), "someone/support-bot")
+    assert calls == [
+        ("create", "someone/support-bot-lora", True),
+        ("auth_check", "someone/support-bot-lora", True),
+        ("create", "someone/support-bot-GGUF", True),
+        ("auth_check", "someone/support-bot-GGUF", True),
+    ]
+
+
+def test_model_card_names_the_split_the_results_were_measured_on(tmp_path: Path):
+    """--split can override the config, so the card takes the split from the saved results."""
+    cfg = load_config("configs/qwen3_4b_qlora.yaml")
+    cfg["eval"]["results_dir"] = str(tmp_path)
+    assert cfg["eval"]["split"] == "test"
+    assert export.split_warning(cfg) is None  # nothing evaluated yet: the config's split
+    (tmp_path / "tuned_metrics.json").write_text('{"split": "validation"}', encoding="utf-8")
+    card = export.render_model_card(cfg, tmp_path)
+    assert "held-out validation questions" in card
+    warning = export.split_warning(cfg)
+    assert warning is not None
+    assert "validation split" in warning
+    (tmp_path / "tuned_metrics.json").write_text('{"split": "test"}', encoding="utf-8")
+    assert export.split_warning(cfg) is None
 
 
 def test_model_card_is_filled(tmp_path: Path):

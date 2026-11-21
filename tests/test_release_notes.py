@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -53,7 +54,20 @@ def test_main_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     assert "does not match" in capsys.readouterr().err
 
 
+def test_citation_must_name_the_release(tmp_path: Path):
+    repo = make_repo(tmp_path, "0.2.0")
+    citation = repo / "CITATION.cff"
+    citation.write_text('cff-version: 1.2.0\nversion: 0.2.0\ndate-released: "2026-12-01"\n', encoding="utf-8")
+    assert "Something new" in release_notes.release_notes("v0.2.0", repo)
+    citation.write_text('cff-version: 1.2.0\nversion: 0.1.0\ndate-released: "2026-12-01"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match=re.escape("CITATION.cff says version 0.1.0")):
+        release_notes.release_notes("v0.2.0", repo)
+    citation.write_text("cff-version: 1.2.0\nversion: 0.2.0\ndate-released: 2026-11-17\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=re.escape("date-released 2026-11-17, but CHANGELOG.md says 2026-12-01")):
+        release_notes.release_notes("v0.2.0", repo)
+
+
 def test_the_real_changelog_has_notes_for_the_current_version():
-    """Guards the next release: bump pyproject.toml and CHANGELOG.md together."""
+    """Guards the next release: bump pyproject.toml, CHANGELOG.md and CITATION.cff together."""
     version = release_notes.project_version(release_notes.ROOT / "pyproject.toml")
     assert release_notes.release_notes(f"v{version}")
