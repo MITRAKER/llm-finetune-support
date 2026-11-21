@@ -1,7 +1,7 @@
 # Light dependencies: data preparation, metrics, quality gates and the optional
 # LLM judge. Enough to run the unit tests (no GPU, no torch).
 # Exact versions = the versions CI tests. Dependabot proposes upgrades as pull requests.
-anthropic==2.9.0
+anthropic==2.10.0
 pandas==3.1.1
 pydantic==2.14.3
 PyYAML==6.0.3
