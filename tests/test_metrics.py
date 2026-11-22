@@ -28,6 +28,13 @@ def test_strip_reasoning():
         ("Call us at (555)123-4567.", "phone"),
         ("Call us at 555-1234.", "phone"),
         ("Call +1 555 0100 for help.", "phone"),
+        ("Please call our customer service at 555-0199.", "phone"),
+        ("Contact our customer support team at 555-0199 for help.", "phone"),
+        ("You can reach our support team at 555-0199.", "phone"),
+        ("Call us 24/7 at 555-0199.", "phone"),
+        ("You can also try calling 555-0199.", "phone"),
+        ("Texting 555-0199 works too.", "phone"),
+        ("Mobile: 555-0199", "phone"),
         ("Your tracking number is 1Z999AA10123456784.", "code"),
         ("Use the discount code SAVE100 at checkout.", "code"),
         ("Visit shop.example.de for details.", "url"),
@@ -66,9 +73,20 @@ def test_details_the_customer_gave_may_be_repeated_in_any_format():
 
 
 @pytest.mark.parametrize(
-    "text", ["Orders of 100-1000 units ship by freight.", "The warehouse is open 900-1700 on weekdays."]
+    "text",
+    [
+        "Orders of 100-1000 units ship by freight.",
+        "Orders of 150-2500 ship by freight.",
+        "The warehouse is open 900-1700 on weekdays.",
+        "Our phone lines are open 900-1700 on weekdays.",
+        "You can call us between 800-2000, seven days a week.",
+        "Contact us about orders of 250-5000 units.",
+        "Feel free to contact us. Orders of 250-5000 ship by freight.",
+    ],
 )
 def test_number_ranges_are_not_phone_numbers(text):
+    """A short number needs a word such as "call" before it in the same sentence, and even
+    then a range of round hundreds or a number followed by a unit is not a phone number."""
     assert "phone" not in m.invented_details(text)
 
 
@@ -76,28 +94,94 @@ def test_a_short_number_after_a_word_such_as_call_is_a_phone_number():
     """Only the number is reported, not the word that marks it as a phone number."""
     assert m.invented_details("Call us at 555 0199 for help.") == {"phone": ["555 0199"]}
     assert m.invented_details("Our helpline number is 555-0199.") == {"phone": ["555-0199"]}
+    assert m.invented_details("Tel. 555 0199, any time.") == {"phone": ["555 0199"]}
+    # Every number after the word counts, so an invented second number is caught.
+    found = m.invented_details("Call 555-0199 or 555-0123.", user_message="call me at 555-0199")
+    assert found == {"phone": ["555-0123"]}
+    # A short number inside a longer one is not reported twice.
+    assert m.invented_details("Call us at (555) 123-4567.") == {"phone": ["(555) 123-4567"]}
+
+
+@pytest.mark.parametrize(
+    ("reply", "user"),
+    [
+        ("We will call you at 555-0199.", "My new mobile is 555-0199, please update it."),
+        ("We'll text 555 0199.", "My cell is 555 0199"),
+        ("Your order number 482-9137 is on its way.", "Where is my order 482-9137?"),
+    ],
+)
+def test_a_short_number_the_customer_gave_may_be_repeated(reply, user):
+    """The customer's own short number needs no word such as "call" to count as given."""
+    assert m.invented_details(reply, user_message=user) == {}
 
 
 def test_a_phone_number_the_customer_gave_may_gain_or_lose_its_country_code():
     assert m.invented_details("We will call +1 555 123 4567 today.", user_message="Call me on 555-123-4567") == {}
     assert m.invented_details("We will call +44 20 7946 0958.", user_message="call me on 020 7946 0958") == {}
+    assert m.invented_details("We will call +49 30 1234 5678.", user_message="call me on 030 1234 5678") == {}
     found = m.invented_details("We will call +1 555 123 4568.", user_message="Call me on 555-123-4567")
     assert found == {"phone": ["+1 555 123 4568"]}
+
+
+@pytest.mark.parametrize(
+    ("reply", "user"),
+    [
+        ("We'll call you back at (212) 555-0199.", "call me at 555-0199"),
+        ("Call us at 1-800-555-0199.", "my number is 555-0199"),
+        ("Call us at 1-800-123-4567.", "My order number is 1234567."),
+        ("Call +1 800 4567 1234 for help.", "My order 45671234 is late"),
+        ("Call us at +1 800 555 0199.", "My tracking number is 94001118005550199"),
+        ("Call us at 555-0199.", "Order 0199 is late"),
+    ],
+)
+def test_only_a_country_code_may_be_added_to_a_number_the_customer_gave(reply, user):
+    """An invented area code, or an invented number that ends in the customer's order
+    number, is not the customer's phone number."""
+    assert "phone" in m.invented_details(reply, user_message=user)
+
+
+def test_the_country_code_rule_is_for_phone_numbers_only():
+    found = m.invented_details("Your new order number is 9912345678.", user_message="Where is order 12345678?")
+    assert found == {"long_number": ["9912345678"]}
 
 
 def test_a_link_ends_before_brackets_and_punctuation():
     given = "Is https://shop.example.com/track the right page?"
     assert m.invented_details("Yes: [track it](https://shop.example.com/track).", user_message=given) == {}
     assert m.invented_details("Yes, https://shop.example.com/track, as you said.", user_message=given) == {}
+    assert m.invented_details("Yes: **https://shop.example.com/track**", user_message=given) == {}
+    assert m.invented_details("Yes: \u201chttps://shop.example.com/track\u201d", user_message=given) == {}
+    assert m.invented_details("Yes, https://shop.example.com/track\u2026", user_message=given) == {}
     found = m.invented_details("See [returns](https://shop.example.com/returns).")
     assert found == {"url": ["https://shop.example.com/returns"]}
 
 
-def test_a_bare_number_excuses_an_amount_only_next_to_a_money_word():
-    assert m.invented_details("We will refund $100 today.", user_message="Order 100 never arrived.") == {
-        "money": ["$100"]
-    }
-    assert m.invented_details("We will refund $100 today.", user_message="I paid 100 for it.") == {}
+@pytest.mark.parametrize(
+    ("reply", "user"),
+    [
+        ("We will refund $100 today.", "I paid 100 for it."),
+        ("We will refund $100 today.", "I was charged 100 for it"),
+        ("Your payment of $50 was declined.", "My payment of 50 was declined"),
+        ("I can see the two charges of $25 on your card.", "There are two charges of 25 on my card"),
+        ("We will refund $1,299.", "My payment of 1,299 bounced"),
+        ("We will refund $120.", "I bought it for 120 last week"),
+        ("We will refund $100 today.", "I want my 100 refunded"),
+    ],
+)
+def test_a_bare_number_next_to_a_money_word_excuses_the_amount(reply, user):
+    assert m.invented_details(reply, user_message=user) == {}
+
+
+@pytest.mark.parametrize(
+    "user",
+    [
+        "Order 100 never arrived.",
+        "Order 100 sent to Europe never arrived.",  # "Eur" in "Europe" is not a money word
+        "Order 100 never arrived and I want a refund.",  # the money word is too far away
+    ],
+)
+def test_a_bare_number_far_from_a_money_word_does_not_excuse_an_amount(user):
+    assert m.invented_details("We will refund $100 today.", user_message=user) == {"money": ["$100"]}
 
 
 def test_placeholders_and_user_supplied_details_are_not_flagged():

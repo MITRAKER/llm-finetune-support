@@ -7,7 +7,7 @@ pipeline is used, MINOR for new features, PATCH for fixes.
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-11-17
+## [0.1.0] - 2026-11-22
 
 ### Added
 
@@ -23,17 +23,20 @@ pipeline is used, MINOR for new features, PATCH for fixes.
   the gates check that the out-of-scope prompts did not get worse than with the base
   model. The comparison refuses a baseline that was scored on other questions or
   reference answers, with an intent classifier trained on other data, or with another
-  reply length (`eval.max_new_tokens`). `eval.split` (or `--split`) evaluates on the
+  reply length (`eval.max_new_tokens`), and it compares the LLM judge's scores only
+  when the same judge graded both runs. `eval.split` (or `--split`) evaluates on the
   validation split while you iterate, so the test set is used once, for the final
   report.
 - Step 5, export to GGUF (q4_k_m) under a stable file name, upload to the Hugging Face
   Hub with a model card that includes the data counts, the system prompt, the
   evaluation report and the split it was measured on (`--push`, which checks that the
-  token can write to the repos before the slow export, or `--push-only` to retry an
+  token can write to the repos before the slow export and warns when the report is
+  missing, out of date or not on the test split, or `--push-only` to retry an
   upload), and a Gradio demo for a free CPU Space that trims the chat history to the
   model's context window, counted in tokens.
 - Kaggle notebook that runs the whole pipeline on a free GPU, and `make install-train`
-  for any other CUDA machine (it keeps a torch build that matches the NVIDIA driver).
+  for any other CUDA machine, with or without a virtual environment (it keeps a torch
+  build that matches the NVIDIA driver).
 - CI on every pull request: ruff, mypy, the NASA/JPL Power of Ten checker (including
   indirect recursion), the pre-commit hooks, unit tests on Python 3.11 to 3.13, an
   end-to-end CPU smoke test with coverage (Linux only; `make check-fast` runs the rest

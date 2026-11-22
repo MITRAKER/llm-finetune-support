@@ -74,6 +74,27 @@ def test_out_of_scope_gates_catch_a_safety_regression():
     assert len(evaluate.check_gates(report(0.70, 0.20, 0.30), worse, GATES)) == 1
 
 
+def test_judge_scores_are_compared_only_when_the_same_judge_graded_both_runs(tmp_path: Path):
+    scores = {"judge_correctness": 4.0, "judge_helpfulness": 4.0, "judge_tone": 4.0, "judge_acceptable_rate": 0.9}
+    base = report(0.7, 0.2, 0.3, scores, oos_judge={"judge_acceptable_rate": 0.95})
+    tuned = report(0.93, 0.45, 0.01, scores, oos_judge={"judge_acceptable_rate": 0.80})
+    base["judge"].update(model="claude-opus-5-5", effort="low")
+    tuned["judge"].update(model="claude-haiku-5-5", effort="low")  # a cheaper judge for the second run
+    assert evaluate.check_gates(base, tuned, GATES) == []  # no judge gate across two judges
+    (tmp_path / "base_metrics.json").write_text(json.dumps(base), encoding="utf-8")
+    (tmp_path / "tuned_metrics.json").write_text(json.dumps(tuned), encoding="utf-8")
+    assert evaluate.compare({"eval": {"results_dir": str(tmp_path), "gates": GATES}}) == 0
+    text = (tmp_path / "REPORT.md").read_text(encoding="utf-8")
+    assert "Judge correctness" not in text
+    assert "base model was graded by claude-opus-5-5, effort low and the fine-tuned model by claude-haiku-5-5" in text
+    tuned["judge"]["model"] = "claude-opus-5-5"  # the same judge for both runs: the gate applies
+    assert evaluate.check_gates(base, tuned, GATES) == [
+        "out-of-scope replies the judge accepts 0.800 vs 0.950 for the base model (allowed drop 0.1)"
+    ]
+    tuned["judge"]["effort"] = "high"  # the same model at another effort is another judge
+    assert evaluate.check_gates(base, tuned, GATES) == []
+
+
 def test_compare_refuses_results_from_different_test_examples(tmp_path: Path):
     cfg = {"eval": {"results_dir": str(tmp_path), "gates": GATES}}
     other = {**report(0.93, 0.45, 0.01), "sample_fingerprint": "def456"}
@@ -163,6 +184,7 @@ def test_run_judge_reports_in_domain_and_out_of_scope_separately(tmp_path: Path,
 
     monkeypatch.setattr(evaluate.judge_mod, "judge_all", fake_judge_all)
     report_, rows = evaluate.run_judge(cfg, gen)
+    assert (report_["model"], report_["effort"]) == ("m", "low")  # compare checks that both runs had one judge
     assert report_["in_domain"]["judge_acceptable_rate"] == 1.0
     assert report_["out_of_scope"] == {}  # its only verdict failed
     assert report_["errors"] == 1
@@ -390,20 +412,38 @@ def test_hub_repos_are_created_and_checked_for_write_access():
     ]
 
 
-def test_model_card_names_the_split_the_results_were_measured_on(tmp_path: Path):
-    """--split can override the config, so the card takes the split from the saved results."""
+def save_and_compare(results: Path, split: str) -> None:
+    """Step 2 and step 4 on one split: save both metrics files, then compare them."""
+    for name, intent in (("base", 0.7), ("tuned", 0.93)):
+        result = {**report(intent, 0.45, 0.01), "split": split}
+        (results / f"{name}_metrics.json").write_text(json.dumps(result), encoding="utf-8")
+    evaluate.compare({"eval": {"results_dir": str(results), "gates": GATES}})
+
+
+def test_model_card_names_the_split_of_its_report_and_push_warns_until_it_is_final(tmp_path: Path):
+    """The card's numbers come from REPORT.md, so its split must too: --split overrides the
+    config, and a model evaluated again without a new comparison makes the metrics newer."""
     cfg = load_config("configs/qwen3_4b_qlora.yaml")
     cfg["eval"]["results_dir"] = str(tmp_path)
     assert cfg["eval"]["split"] == "test"
-    assert export.split_warning(cfg) is None  # nothing evaluated yet: the config's split
-    (tmp_path / "tuned_metrics.json").write_text('{"split": "validation"}', encoding="utf-8")
-    card = export.render_model_card(cfg, tmp_path)
-    assert "held-out validation questions" in card
-    warning = export.split_warning(cfg)
-    assert warning is not None
-    assert "validation split" in warning
-    (tmp_path / "tuned_metrics.json").write_text('{"split": "test"}', encoding="utf-8")
-    assert export.split_warning(cfg) is None
+    assert export.results_split(cfg, tmp_path) == "test"  # nothing compared yet: the config's split
+    assert export.push_warnings(cfg) == [
+        "Warning: there is no evaluation report yet, so the model card will have no numbers. Run step 4 first."
+    ]
+    save_and_compare(tmp_path, "validation")
+    assert "held-out validation questions" in export.render_model_card(cfg, tmp_path)
+    assert not export.report_is_stale(tmp_path)
+    assert ["validation split" in w for w in export.push_warnings(cfg)] == [True]
+    # The tuned model is evaluated on the test split, but the comparison is not run again.
+    # REPORT.md still holds the validation numbers, so the card must still say validation.
+    on_test = {**report(0.95, 0.5, 0.0), "split": "test"}
+    (tmp_path / "tuned_metrics.json").write_text(json.dumps(on_test), encoding="utf-8")
+    assert "held-out validation questions" in export.render_model_card(cfg, tmp_path)
+    assert export.report_is_stale(tmp_path)
+    assert "evaluated again after REPORT.md was written" in export.push_warnings(cfg)[0]
+    save_and_compare(tmp_path, "test")
+    assert "held-out test questions" in export.render_model_card(cfg, tmp_path)
+    assert export.push_warnings(cfg) == []
 
 
 def test_model_card_is_filled(tmp_path: Path):

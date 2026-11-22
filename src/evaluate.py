@@ -27,7 +27,16 @@ from typing import Any
 
 import judge as judge_mod
 import metrics
-from common import build_prompt_messages, load_config, read_jsonl, set_seed, write_json, write_jsonl
+from common import (
+    REPORT_INFO_FILE,
+    build_prompt_messages,
+    file_digest,
+    load_config,
+    read_jsonl,
+    set_seed,
+    write_json,
+    write_jsonl,
+)
 
 # Not 2: Python's argparse exits with 2 on a usage error, and "retrain the model"
 # must not look like a mistyped command to a script or CI job that reads the code.
@@ -223,6 +232,7 @@ def run_judge(cfg: dict[str, Any], gen: Generated) -> tuple[dict[str, Any], list
     out_scope = [by_id[o["id"]] for o in gen.oos]
     report = {
         "model": jcfg["model"],
+        "effort": jcfg["effort"],
         "errors": summary.n_errors,
         "est_cost_usd": summary.est_cost_usd,
         "in_domain": judge_mod.summarize(in_domain, jcfg["model"]).scores,
@@ -359,7 +369,9 @@ def out_of_scope_failures(base: dict[str, Any], tuned: dict[str, Any], gates: di
         )
     b_ok = judge_score(base, "out_of_scope", "judge_acceptable_rate")
     t_ok = judge_score(tuned, "out_of_scope", "judge_acceptable_rate")
-    if b_ok is not None and t_ok is not None and b_ok - t_ok > gates["max_oos_judge_acceptable_drop"]:
+    if not same_judge(base, tuned) or b_ok is None or t_ok is None:
+        return failures  # the judge gate needs both runs graded by the same judge
+    if b_ok - t_ok > gates["max_oos_judge_acceptable_drop"]:
         failures.append(
             f"out-of-scope replies the judge accepts {t_ok:.3f} vs {b_ok:.3f} for the base model "
             f"(allowed drop {gates['max_oos_judge_acceptable_drop']})"
@@ -371,6 +383,33 @@ def judge_score(report: dict[str, Any], part: str, key: str) -> float | None:
     """One LLM-judge score from a metrics report, or None when the judge did not run."""
     value = report.get("judge", {}).get(part, {}).get(key)
     return None if value is None else float(value)
+
+
+def judge_used(report: dict[str, Any]) -> str | None:
+    """Which LLM judge graded a run ("model, effort level"), or None when the judge did not run."""
+    judge = report.get("judge")
+    return f"{judge.get('model')}, effort {judge.get('effort', 'not recorded')}" if judge else None
+
+
+def same_judge(base: dict[str, Any], tuned: dict[str, Any]) -> bool:
+    """Judge scores can be compared only when the same judge, at the same effort, graded both runs.
+
+    Judges differ in strictness: a cheaper judge for one of the runs would move the scores
+    for reasons that have nothing to do with fine-tuning.
+    """
+    used = judge_used(base)
+    return used is not None and used == judge_used(tuned)
+
+
+def judge_note(base: dict[str, Any], tuned: dict[str, Any]) -> str | None:
+    """Why the judge scores are missing from the report when both runs were judged differently."""
+    b_used, t_used = judge_used(base), judge_used(tuned)
+    if b_used is None or t_used is None or b_used == t_used:
+        return None
+    return (
+        f"The LLM judge scores are not compared: the base model was graded by {b_used} and the "
+        f"fine-tuned model by {t_used}. Evaluate both with the same eval.judge settings to compare them."
+    )
 
 
 # (label, section of the metrics report, key), in the order the report shows them.
@@ -397,7 +436,8 @@ def comparison_table(base: dict[str, Any], tuned: dict[str, Any]) -> str:
     for label, section, key in TABLE_ROWS:
         b, t = base[section][key], tuned[section][key]
         lines.append(f"| {label} | {b:.3f} | {t:.3f} | {t - b:+.3f} |")
-    for label, part, key in JUDGE_TABLE_ROWS:
+    judge_rows = JUDGE_TABLE_ROWS if same_judge(base, tuned) else ()
+    for label, part, key in judge_rows:
         b_j, t_j = judge_score(base, part, key), judge_score(tuned, part, key)
         if b_j is not None and t_j is not None:
             lines.append(f"| {label} | {b_j:.3f} | {t_j:.3f} | {t_j - b_j:+.3f} |")
@@ -431,7 +471,12 @@ def check_comparable(base: dict[str, Any], tuned: dict[str, Any]) -> None:
 
 
 def compare(cfg: dict[str, Any]) -> int:
-    """Write results/REPORT.md and return the process exit code (0 pass, 3 retrain)."""
+    """Write results/REPORT.md and return the process exit code (0 pass, 3 retrain).
+
+    Next to the report it writes report.json: the split the report is on and a digest of
+    each metrics file it was built from. export.py uses it to label the model card and to
+    warn when a newer evaluation was never compared.
+    """
     out = Path(cfg["eval"]["results_dir"])
     base = json.loads((out / "base_metrics.json").read_text(encoding="utf-8"))
     tuned = json.loads((out / "tuned_metrics.json").read_text(encoding="utf-8"))
@@ -448,10 +493,15 @@ def compare(cfg: dict[str, Any]) -> int:
         "",
         comparison_table(base, tuned),
         "",
-        f"**Quality gates: {verdict}**",
     ]
+    note = judge_note(base, tuned)
+    lines += [note, ""] if note else []
+    lines.append(f"**Quality gates: {verdict}**")
     lines += [f"- {f}" for f in failures]
     (out / "REPORT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    info = {"split": tuned.get("split", "test")}
+    info.update({name: file_digest(out / f"{name}.json") for name in ("base_metrics", "tuned_metrics")})
+    write_json(out / REPORT_INFO_FILE, info)
     print("\n".join(lines))
     return 0 if not failures else EXIT_GATES_FAILED
 

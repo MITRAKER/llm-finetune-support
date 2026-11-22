@@ -27,7 +27,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from common import SYSTEM_PROMPT, load_config
+from common import REPORT_INFO_FILE, SYSTEM_PROMPT, file_digest, load_config
 
 MODEL_CARD_TEMPLATE = Path(__file__).resolve().parent.parent / "docs" / "MODEL_CARD.md"
 
@@ -125,24 +125,46 @@ def data_card(cfg: dict[str, Any]) -> dict[str, str]:
 
 
 def results_split(cfg: dict[str, Any], results_dir: str | Path) -> str:
-    """The split the saved evaluation results were measured on.
+    """The split that REPORT.md, the numbers on the model card, was measured on.
 
-    It comes from the results, not the config: --split can override the config, so the
-    two can disagree. Before any evaluation has run, it is the config's split.
+    evaluate.py --compare records it next to the report: the config cannot say, because
+    --split overrides it, and the metrics files cannot either, because they can be newer
+    than the report. Before any comparison has run, it is the config's split.
     """
-    tuned = read_json_or_empty(Path(results_dir) / "tuned_metrics.json")
-    return str(tuned.get("split", cfg["eval"].get("split", "test")))
+    info = read_json_or_empty(Path(results_dir) / REPORT_INFO_FILE)
+    return str(info.get("split", cfg["eval"].get("split", "test")))
 
 
-def split_warning(cfg: dict[str, Any]) -> str | None:
-    """A warning for --push when the results to publish are not on the test split."""
-    split = results_split(cfg, cfg["eval"]["results_dir"])
-    if split == "test":
-        return None
-    return (
-        f"Warning: the evaluation results are on the {split} split, and the model card will say so. "
-        "Before you publish final numbers, evaluate both models on the test split and compare again."
-    )
+def report_is_stale(results_dir: str | Path) -> bool:
+    """Whether a metrics file changed after REPORT.md was written, so the report shows old numbers.
+
+    This happens when a model is evaluated again (after retraining, or on another split)
+    and the comparison is not run again, or is refused.
+    """
+    results = Path(results_dir)
+    info = read_json_or_empty(results / REPORT_INFO_FILE)
+    names = ("base_metrics", "tuned_metrics")
+    return any((results / f"{n}.json").exists() and info.get(n) != file_digest(results / f"{n}.json") for n in names)
+
+
+def push_warnings(cfg: dict[str, Any]) -> list[str]:
+    """Warnings for --push: reasons why the numbers on the model card may not be the final ones."""
+    results = Path(cfg["eval"]["results_dir"])
+    if not (results / "REPORT.md").exists():
+        return ["Warning: there is no evaluation report yet, so the model card will have no numbers. Run step 4 first."]
+    warnings = []
+    if report_is_stale(results):
+        warnings.append(
+            "Warning: a model was evaluated again after REPORT.md was written, so the model card would show "
+            "old numbers. Run evaluate.py --compare again before you publish."
+        )
+    split = results_split(cfg, results)
+    if split != "test":
+        warnings.append(
+            f"Warning: the evaluation report is on the {split} split, and the model card will say so. "
+            "Before you publish final numbers, evaluate both models on the test split and compare again."
+        )
+    return warnings
 
 
 def render_model_card(cfg: dict[str, Any], results_dir: str | Path, template: Path = MODEL_CARD_TEMPLATE) -> str:
@@ -249,8 +271,7 @@ def main(argv: list[str] | None = None) -> dict[str, str]:  # pragma: no cover -
 
         repo, token = push_settings(cfg)  # before the slow export: a missing setting fails in seconds
         create_hub_repos(HfApi(token=token), repo)
-        warning = split_warning(cfg)
-        if warning:
+        for warning in push_warnings(cfg):
             print(warning)
     gguf = exported_gguf(cfg) if args.push_only else export(cfg)
     outputs = {"adapter": str(adapter_dir(cfg)), "gguf": str(gguf)}

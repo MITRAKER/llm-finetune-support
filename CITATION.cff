@@ -6,7 +6,7 @@ authors:
   - family-names: Kermanian
     given-names: Mitra
 version: 0.1.0
-date-released: "2026-11-17"
+date-released: "2026-11-22"
 license: MIT
 repository-code: "https://github.com/MITRAKER/llm-finetune-support"
 keywords:

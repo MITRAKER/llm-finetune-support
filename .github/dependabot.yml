@@ -4,8 +4,10 @@
 version: 2
 registries:
   # The demo app installs llama-cpp-python's prebuilt CPU wheels from this public
-  # index (app/requirements.txt). Dependabot can only reach the package hosts that
-  # are named here, so the index is declared even though it needs no password.
+  # index (app/requirements.txt). Besides public registries such as PyPI, Dependabot
+  # can only reach the package indexes declared here: an --extra-index-url in a
+  # requirements file is not enough. So the index is declared, although it needs no
+  # password.
   llama-cpp-cpu-wheels:
     type: python-index
     url: https://abetlen.github.io/llama-cpp-python/whl/cpu
@@ -37,14 +39,20 @@ updates:
       - dependency-name: unsloth
       - dependency-name: unsloth-zoo
       # transformers 5.17 and datasets 4.8 need huggingface-hub below 2, so a 2.x
-      # release can only come with the next upgrade of the stack above.
+      # release can only come with the next upgrade of the stack above. Dependabot
+      # skips update types only when it can read a current version from the
+      # requirement, which this range does not give, so the versions are listed.
       - dependency-name: huggingface-hub
-        update-types: ["version-update:semver-major"]
+        versions: [">=2"]
   - package-ecosystem: pip
     # The demo app is not tied to the training stack: it runs huggingface-hub 2.x.
     directory: "/app"
     registries:
       - llama-cpp-cpu-wheels
+    # With a registry, Dependabot refuses to read pip files unless this is "allow",
+    # because a setup.py could run code that sees the registry's password. The only
+    # registry here is public and has no password, so there is nothing to leak.
+    insecure-external-code-execution: allow
     schedule:
       interval: weekly
   - package-ecosystem: github-actions

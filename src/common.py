@@ -8,6 +8,7 @@ reasons a fine-tuned model looks worse in production than in evaluation.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -33,6 +34,11 @@ SYSTEM_PROMPT = (
 
 # Matches placeholders such as {{Order Number}} in the dataset's responses.
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+
+# evaluate.py --compare writes results/REPORT.md and, next to it, this record of what the
+# report was built from. export.py reads it to label the model card and to spot a report
+# that is older than the latest evaluation.
+REPORT_INFO_FILE = "report.json"
 
 
 def load_config(path: str | os.PathLike) -> dict[str, Any]:
@@ -74,6 +80,11 @@ def write_json(path: str | os.PathLike, obj: Any) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)
         f.write("\n")
+
+
+def file_digest(path: str | os.PathLike) -> str:
+    """A short hash of a file's bytes: it changes whenever the file does."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
 
 
 def set_seed(seed: int) -> None:

@@ -1,6 +1,10 @@
 # Shortcuts for the commands CI runs. Usage: make help
 
 PYTHON ?= python
+# The interpreter's full path. uv needs it to install into a Python outside a virtual
+# environment, such as a CUDA image's system or conda Python: given a bare name such as
+# "python", it only looks for a venv.
+PYTHON_PATH = $(shell $(PYTHON) -c "import sys; print(sys.executable)")
 CONFIG ?= configs/qwen3_4b_qlora.yaml
 
 .PHONY: help install install-train lint format typecheck power-of-ten test smoke smoke-stack check check-fast data baseline train evaluate compare export
@@ -14,7 +18,7 @@ install: ## Install the dev tools and pre-commit hooks (no GPU needed)
 
 install-train: ## Install the GPU training stack, with the torch build for your NVIDIA driver
 	$(PYTHON) -m pip install uv
-	$(PYTHON) -m uv pip install --python $(PYTHON) -r requirements/train.txt --torch-backend=auto
+	$(PYTHON) -m uv pip install --python "$(PYTHON_PATH)" -r requirements/train.txt --torch-backend=auto
 
 lint: ## Ruff lint
 	ruff check .
