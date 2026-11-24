@@ -2,8 +2,9 @@
 
 PYTHON ?= python
 # The interpreter's full path. uv needs it to install into a Python outside a virtual
-# environment, such as a CUDA image's system or conda Python: given a bare name such as
-# "python", it only looks for a venv.
+# environment, such as a conda Python: given a bare name such as "python", it only looks
+# for a venv. (The system Python of recent Debian and Ubuntu refuses pip installs: use a
+# venv there.)
 PYTHON_PATH = $(shell $(PYTHON) -c "import sys; print(sys.executable)")
 CONFIG ?= configs/qwen3_4b_qlora.yaml
 

@@ -268,15 +268,22 @@ Every reply is scored, and every score is saved per example in
   and dates are removed before matching. Details copied from the customer's own
   message are allowed, but only whole: if the customer wrote order 88231, a reply
   that promises a refund of $88 still counts as invented. Three rules keep the
-  matching fair. A phone number may gain or lose its country code (+1 555 123 4567
-  is 555-123-4567), but nothing else, so an invented area code still counts. A
-  short number such as 555-0199 is a phone number only when a word such as "call"
-  or "contact" comes before it in the same sentence, because on its own it is as
-  often a range ("orders of 100-1000"). And a bare number the customer wrote
-  excuses an amount only next to a money word: "I paid 100" excuses "$100", "order
-  100" does not. The regular expressions are in `DETAIL_PATTERNS`, with tests for
-  both directions: things that must be caught, and look-alikes (dates, ranges,
-  opening hours, version numbers) that must not be.
+  matching fair. A number of 8 or more digits that the customer wrote may gain or
+  lose up to three leading digits, such as a country code (+1 555 123 4567 is
+  555-123-4567), or a leading 0. A shorter number may gain none, so an area code
+  added to the customer's 555-0199 still counts. (A known limit: the rule cannot
+  tell a country code from any other prefix of up to three digits.) A short number
+  such as 555-0199 is a phone number only when a word such as "call" or "contact"
+  comes before it in the same sentence (a line that ends with a colon, such as
+  "**Phone:**", runs on to the next line), because on its own it is as often a
+  range ("orders of 100-1000"). And a bare number the customer wrote excuses an
+  amount only next to a money word, and not when it follows an id word: "I paid
+  100" excuses "$100", but "order 100", "invoice 100" and "refunded for order 100"
+  do not. (A number written with two decimals, such as 49.99, counts as an amount
+  wherever the customer wrote it.) The regular expressions are in
+  `src/metrics.py`: `DETAIL_PATTERNS`, and the cue words in `PHONE_CUE_RE` and
+  `MONEY_CUE_RE`. Tests cover both directions: things that must be caught, and
+  look-alikes (dates, ranges, opening hours, version numbers) that must not be.
 - **Placeholder rate** and **average length**, to see the style change.
 
 ### The out-of-scope set (`data/out_of_scope.jsonl`)
@@ -457,7 +464,10 @@ hash of the example ids alone would not be enough: ids only number the rows, so 
 a data change the same ids hold different questions. The LLM judge's scores are
 compared only when the same judge model, at the same effort, graded both runs: a
 cheaper judge is often more or less strict, so the report leaves the judge rows and
-the judge gate out, and says why.
+the judge gate out, and says why. It also says when only one run was judged, or when
+the judge could not grade some replies (an API error that outlived the retries, for
+example when the credit runs out): with no verdict on a run's out-of-scope replies,
+the judge gate cannot be applied, and a report that passes without it must say so.
 
 If any gate fails, the script prints the reasons and exits with **code 3**. Exit
 codes are how programs report success to other programs: the notebook (or a CI job)
@@ -560,9 +570,14 @@ The card names the split its numbers were measured on. It takes it from
 `results/report.json`, which `evaluate.py --compare` writes next to `REPORT.md`, so
 the label always belongs to the numbers on the card: the config cannot say, because
 `--split` overrides it, and the metrics files cannot either, because a model may have
-been evaluated again since the last comparison. `--push` warns when the report is
-not on the test split, and when a metrics file changed after the report was written
-(it keeps a hash of each one).
+been evaluated again since the last comparison. `report.json` also keeps a hash of
+each metrics file and of the adapter the fine-tuned model was evaluated with. Training
+again overwrites `final_adapter` under the same name, so without that hash a retrained
+adapter would go up with the previous adapter's numbers and its PASS. `--push` and
+`--push-only` therefore refuse to start when the adapter changed after the report.
+They warn, before the export and again after the upload, when the report is not on
+the test split, when a metrics file changed after it was written, or when an older
+version of `evaluate.py` wrote it.
 
 ### The demo app
 

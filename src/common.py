@@ -36,8 +36,9 @@ SYSTEM_PROMPT = (
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
 
 # evaluate.py --compare writes results/REPORT.md and, next to it, this record of what the
-# report was built from. export.py reads it to label the model card and to spot a report
-# that is older than the latest evaluation.
+# report was built from. export.py reads it to label the model card, to spot a report that
+# is older than the latest evaluation, and to refuse to publish an adapter the report does
+# not describe.
 REPORT_INFO_FILE = "report.json"
 
 
@@ -84,7 +85,25 @@ def write_json(path: str | os.PathLike, obj: Any) -> None:
 
 def file_digest(path: str | os.PathLike) -> str:
     """A short hash of a file's bytes: it changes whenever the file does."""
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+    with open(path, "rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()[:16]
+
+
+def adapter_path(cfg: dict[str, Any], folder: str | os.PathLike | None = None) -> Path:
+    """The LoRA adapter folder: the one given (evaluate.py --adapter), or the one step 3 saves."""
+    return Path(folder) if folder else Path(cfg["train"]["output_dir"]) / "final_adapter"
+
+
+def adapter_digest(folder: str | os.PathLike) -> str | None:
+    """A short hash of a LoRA adapter's weights, or None when the folder has none.
+
+    Training again overwrites the adapter in the same folder, so the hash, not the
+    folder name, tells which adapter a set of results describes.
+    """
+    for name in ("adapter_model.safetensors", "adapter_model.bin"):
+        if (Path(folder) / name).is_file():
+            return file_digest(Path(folder) / name)
+    return None
 
 
 def set_seed(seed: int) -> None:

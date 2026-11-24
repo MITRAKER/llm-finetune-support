@@ -104,6 +104,7 @@ the full check on every pull request.
 ### Run the steps yourself on a CUDA machine
 
 ```bash
+python3 -m venv .venv && . .venv/bin/activate      # or a conda environment
 make install-train                                 # the GPU stack, with torch built for your driver
 make data baseline train evaluate compare export   # or run each script with --config
 ```
@@ -113,6 +114,10 @@ make data baseline train evaluate compare export   # or run each script with --c
 that already fits and otherwise picks the build that matches your NVIDIA driver. A
 plain `pip install -r requirements/train.txt` can replace torch with PyPI's default
 build, which uses CUDA 13 and needs driver 580 or newer (`nvidia-smi` shows yours).
+It works in a virtual environment, a conda environment or any other Python that pip
+can install into. On Debian 12, Ubuntu 23.04 and newer, pip refuses to install into
+the system Python (it is "externally managed"), so create a virtual environment
+there first, as above.
 
 Every setting lives in [`configs/qwen3_4b_qlora.yaml`](configs/qwen3_4b_qlora.yaml).
 One experiment is one config file: copy it to try another model or other hyperparameters.

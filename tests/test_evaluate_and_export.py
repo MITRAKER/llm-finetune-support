@@ -13,7 +13,7 @@ import evaluate
 import export
 import judge as judge_mod
 import train
-from common import SYSTEM_PROMPT, load_config, write_jsonl
+from common import SYSTEM_PROMPT, adapter_digest, adapter_path, load_config, write_jsonl
 
 GATES = {
     "min_intent_accuracy": 0.85,
@@ -93,6 +93,41 @@ def test_judge_scores_are_compared_only_when_the_same_judge_graded_both_runs(tmp
     ]
     tuned["judge"]["effort"] = "high"  # the same model at another effort is another judge
     assert evaluate.check_gates(base, tuned, GATES) == []
+    del base["judge"]["effort"]  # results written before the judge's effort was recorded
+    note = evaluate.judge_note(base, tuned)
+    assert note is not None
+    assert note.endswith("The base model's results do not record the judge's effort: evaluate that model again.")
+
+
+def test_the_report_says_when_the_judge_graded_one_run_only_or_failed(tmp_path: Path):
+    """Without this note, the judge rows and the out-of-scope judge gate would vanish in silence."""
+    scores = {"judge_correctness": 4.0, "judge_acceptable_rate": 0.9}
+    base = report(0.7, 0.2, 0.3, scores, oos_judge={"judge_acceptable_rate": 0.95})
+    base["judge"].update(model="m", effort="low", errors=0)
+    tuned = report(0.93, 0.45, 0.01)  # step 4 ran without the judge
+    assert evaluate.judge_note(base, tuned) == (
+        "The LLM judge scores are not compared: only the base model was graded by the judge. Evaluate the "
+        "fine-tuned model with the judge too (it runs when ANTHROPIC_API_KEY is set) to compare them."
+    )
+    # Every judge request for the fine-tuned model failed, for example because the API credit ran out.
+    tuned["judge"] = {"model": "m", "effort": "low", "errors": 324, "in_domain": {}, "out_of_scope": {}}
+    assert evaluate.check_gates(base, tuned, GATES) == []  # the judge gate cannot be applied
+    note = (
+        "The judge could not grade 324 of the fine-tuned model's 324 replies, so the out-of-scope judge gate "
+        "was not applied. Evaluate the fine-tuned model again to grade them."
+    )
+    assert evaluate.judge_note(base, tuned) == note
+    (tmp_path / "base_metrics.json").write_text(json.dumps(base), encoding="utf-8")
+    (tmp_path / "tuned_metrics.json").write_text(json.dumps(tuned), encoding="utf-8")
+    assert evaluate.compare({"eval": {"results_dir": str(tmp_path), "gates": GATES}}) == 0
+    assert note in (tmp_path / "REPORT.md").read_text(encoding="utf-8")
+    tuned["judge"] = {**base["judge"], "errors": 3}  # a few failures: the scores leave them out
+    assert evaluate.judge_note(base, tuned) == (
+        "The judge could not grade 3 of the fine-tuned model's 324 replies, and its scores leave them out. "
+        "Evaluate the fine-tuned model again to grade them."
+    )
+    assert evaluate.judge_note(base, base) is None
+    assert evaluate.judge_note(report(0.7, 0.2, 0.3), report(0.93, 0.45, 0.01)) is None  # no judge at all
 
 
 def test_compare_refuses_results_from_different_test_examples(tmp_path: Path):
@@ -152,6 +187,7 @@ def tiny_generation(tmp_path: Path) -> tuple[dict[str, Any], evaluate.Generated]
     oos = [{"id": "oos-1", "type": "off_topic", "prompt": "write a poem", "expected": "decline politely"}]
     cfg = {
         "data": {"out_dir": str(tmp_path / "data")},
+        "train": {"output_dir": str(tmp_path / "lora")},
         "seed": 1,
         "eval": {"results_dir": str(tmp_path / "results"), "judge": {"model": "m", "effort": "low", "max_workers": 2}},
     }
@@ -172,6 +208,31 @@ def test_replies_are_saved_before_the_judge_runs(tmp_path: Path, monkeypatch: py
     assert saved["metrics"]["n"] == 1  # the slow generation is not lost
     assert saved["out_of_scope"]["n"] == 1
     assert len((tmp_path / "results" / "tuned_predictions.jsonl").read_text(encoding="utf-8").splitlines()) == 2
+
+
+def fake_adapter(cfg: dict[str, Any], weights: bytes) -> str:
+    """Save LoRA weights where step 3 saves them, and return their digest."""
+    folder = adapter_path(cfg)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "adapter_model.safetensors").write_bytes(weights)
+    digest = adapter_digest(folder)
+    assert digest is not None
+    return digest
+
+
+def test_the_fine_tuned_results_record_which_adapter_they_describe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg, gen = tiny_generation(tmp_path)
+    monkeypatch.setattr(evaluate, "generate_all", lambda *_: gen)
+    digest = fake_adapter(cfg, b"weights v1")
+    assert evaluate.evaluate_model(cfg, "tuned", "hf", None, use_judge=False)["adapter_digest"] == digest
+    assert "adapter_digest" not in evaluate.evaluate_model(cfg, "base", "hf", None, use_judge=False)
+    other = tmp_path / "other_adapter"  # evaluate.py --adapter names another folder
+    other.mkdir()
+    (other / "adapter_model.safetensors").write_bytes(b"weights v2")
+    report_ = evaluate.evaluate_model(cfg, "tuned", "hf", str(other), use_judge=False)
+    assert report_["adapter_digest"] == adapter_digest(other) != digest
+    saved = json.loads((tmp_path / "results" / "tuned_metrics.json").read_text(encoding="utf-8"))
+    assert saved["adapter_digest"] == report_["adapter_digest"]
 
 
 def test_run_judge_reports_in_domain_and_out_of_scope_separately(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -412,38 +473,85 @@ def test_hub_repos_are_created_and_checked_for_write_access():
     ]
 
 
-def save_and_compare(results: Path, split: str) -> None:
-    """Step 2 and step 4 on one split: save both metrics files, then compare them."""
+def save_and_compare(results: Path, split: str, adapter: str | None = None) -> None:
+    """Step 2 and step 4 on one split: save both metrics files, then compare them.
+
+    adapter is the digest of the adapter the fine-tuned model was evaluated with
+    (None: the results come from a version of evaluate.py that did not record it).
+    """
     for name, intent in (("base", 0.7), ("tuned", 0.93)):
         result = {**report(intent, 0.45, 0.01), "split": split}
+        if name == "tuned" and adapter:
+            result["adapter_digest"] = adapter
         (results / f"{name}_metrics.json").write_text(json.dumps(result), encoding="utf-8")
     evaluate.compare({"eval": {"results_dir": str(results), "gates": GATES}})
+
+
+def export_config(tmp_path: Path) -> dict[str, Any]:
+    """The real config, with the results and the adapter in a temporary folder."""
+    cfg = load_config("configs/qwen3_4b_qlora.yaml")
+    cfg["eval"]["results_dir"] = str(tmp_path)
+    cfg["train"]["output_dir"] = str(tmp_path / "lora")
+    return cfg
 
 
 def test_model_card_names_the_split_of_its_report_and_push_warns_until_it_is_final(tmp_path: Path):
     """The card's numbers come from REPORT.md, so its split must too: --split overrides the
     config, and a model evaluated again without a new comparison makes the metrics newer."""
-    cfg = load_config("configs/qwen3_4b_qlora.yaml")
-    cfg["eval"]["results_dir"] = str(tmp_path)
+    cfg = export_config(tmp_path)
+    adapter = fake_adapter(cfg, b"weights v1")
     assert cfg["eval"]["split"] == "test"
     assert export.results_split(cfg, tmp_path) == "test"  # nothing compared yet: the config's split
     assert export.push_warnings(cfg) == [
         "Warning: there is no evaluation report yet, so the model card will have no numbers. Run step 4 first."
     ]
-    save_and_compare(tmp_path, "validation")
+    save_and_compare(tmp_path, "validation", adapter)
     assert "held-out validation questions" in export.render_model_card(cfg, tmp_path)
     assert not export.report_is_stale(tmp_path)
     assert ["validation split" in w for w in export.push_warnings(cfg)] == [True]
     # The tuned model is evaluated on the test split, but the comparison is not run again.
     # REPORT.md still holds the validation numbers, so the card must still say validation.
-    on_test = {**report(0.95, 0.5, 0.0), "split": "test"}
+    on_test = {**report(0.95, 0.5, 0.0), "split": "test", "adapter_digest": adapter}
     (tmp_path / "tuned_metrics.json").write_text(json.dumps(on_test), encoding="utf-8")
     assert "held-out validation questions" in export.render_model_card(cfg, tmp_path)
     assert export.report_is_stale(tmp_path)
     assert "evaluated again after REPORT.md was written" in export.push_warnings(cfg)[0]
-    save_and_compare(tmp_path, "test")
+    save_and_compare(tmp_path, "test", adapter)
     assert "held-out test questions" in export.render_model_card(cfg, tmp_path)
     assert export.push_warnings(cfg) == []
+    export.check_report(cfg)  # the report describes the adapter that --push would upload
+
+
+def test_push_refuses_an_adapter_trained_again_after_the_report(tmp_path: Path):
+    """Training again overwrites the adapter in place. The card would then show the previous
+    adapter's numbers and verdict, so --push stops until the new one is evaluated and compared."""
+    cfg = export_config(tmp_path)
+    first = fake_adapter(cfg, b"weights v1")
+    save_and_compare(tmp_path, "test", first)
+    second = fake_adapter(cfg, b"weights v2")  # step 3 again, without step 4
+    with pytest.raises(ValueError, match=r"changed after REPORT\.md was written"):
+        export.check_report(cfg)
+    tuned = {**report(0.6, 0.45, 0.01), "split": "test", "adapter_digest": second}
+    (tmp_path / "tuned_metrics.json").write_text(json.dumps(tuned), encoding="utf-8")  # evaluated, not compared
+    with pytest.raises(ValueError, match=r"evaluate\.py --model tuned, then evaluate\.py --compare"):
+        export.check_report(cfg)
+    save_and_compare(tmp_path, "test", second)
+    export.check_report(cfg)
+    assert export.push_warnings(cfg) == []
+
+
+def test_a_report_is_stale_after_either_model_is_evaluated_again_until_a_comparison_succeeds(tmp_path: Path):
+    save_and_compare(tmp_path, "test", "a1b2c3")
+    assert not export.report_is_stale(tmp_path)
+    # Step 2 again after a data change: the baseline was scored on other prompts.
+    base = {**report(0.7, 0.45, 0.01), "split": "test", "sample_fingerprint": "def456"}
+    (tmp_path / "base_metrics.json").write_text(json.dumps(base), encoding="utf-8")
+    assert export.report_is_stale(tmp_path)
+    info = (tmp_path / "report.json").read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match="different prompts"):
+        evaluate.compare({"eval": {"results_dir": str(tmp_path), "gates": GATES}})
+    assert (tmp_path / "report.json").read_text(encoding="utf-8") == info  # a refused comparison writes nothing
+    assert export.report_is_stale(tmp_path)
 
 
 def test_model_card_is_filled(tmp_path: Path):

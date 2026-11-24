@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from common import load_config, set_seed, use_one_gpu, write_json
+from common import adapter_path, load_config, set_seed, use_one_gpu, write_json
 
 BACKENDS = ("unsloth", "hf")
 TRACKED_PACKAGES = ("torch", "transformers", "trl", "peft", "datasets", "bitsandbytes", "unsloth", "accelerate")
@@ -250,7 +250,7 @@ def train(cfg: dict[str, Any], backend: str, max_steps: int | None = None) -> di
     start = time.time()
     result = trainer.train()
     eval_metrics = trainer.evaluate()
-    adapter_dir = Path(cfg["train"]["output_dir"]) / "final_adapter"
+    adapter_dir = adapter_path(cfg)
     trainer.save_model(str(adapter_dir))  # saves only the LoRA adapter weights + config
     tokenizer.save_pretrained(str(adapter_dir))
 

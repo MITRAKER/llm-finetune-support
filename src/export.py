@@ -27,7 +27,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from common import REPORT_INFO_FILE, SYSTEM_PROMPT, file_digest, load_config
+from common import REPORT_INFO_FILE, SYSTEM_PROMPT, adapter_digest, adapter_path, file_digest, load_config
 
 MODEL_CARD_TEMPLATE = Path(__file__).resolve().parent.parent / "docs" / "MODEL_CARD.md"
 
@@ -80,7 +80,8 @@ def gguf_file_name(cfg: dict[str, Any]) -> str:
 
 
 def adapter_dir(cfg: dict[str, Any]) -> Path:
-    return Path(cfg["train"]["output_dir"]) / "final_adapter"
+    """The adapter that step 3 saved: what export() merges and push_to_hub() uploads."""
+    return adapter_path(cfg)
 
 
 def exported_gguf(cfg: dict[str, Any]) -> Path:
@@ -147,6 +148,22 @@ def report_is_stale(results_dir: str | Path) -> bool:
     return any((results / f"{n}.json").exists() and info.get(n) != file_digest(results / f"{n}.json") for n in names)
 
 
+def check_report(cfg: dict[str, Any]) -> None:
+    """Refuse to publish an adapter that REPORT.md does not describe.
+
+    Training again (step 3) overwrites the adapter in the same folder. Without a new
+    evaluation, the model card would show the previous adapter's numbers and verdict.
+    """
+    info = read_json_or_empty(Path(cfg["eval"]["results_dir"]) / REPORT_INFO_FILE)
+    reported, current = info.get("adapter_digest"), adapter_digest(adapter_dir(cfg))
+    if reported and current and reported != current:
+        raise ValueError(
+            f"The adapter in {adapter_dir(cfg)} changed after REPORT.md was written (it was trained again), "
+            "so the model card would show another adapter's numbers. Evaluate it before you publish: "
+            "evaluate.py --model tuned, then evaluate.py --compare."
+        )
+
+
 def push_warnings(cfg: dict[str, Any]) -> list[str]:
     """Warnings for --push: reasons why the numbers on the model card may not be the final ones."""
     results = Path(cfg["eval"]["results_dir"])
@@ -155,8 +172,8 @@ def push_warnings(cfg: dict[str, Any]) -> list[str]:
     warnings = []
     if report_is_stale(results):
         warnings.append(
-            "Warning: a model was evaluated again after REPORT.md was written, so the model card would show "
-            "old numbers. Run evaluate.py --compare again before you publish."
+            "Warning: a model was evaluated again after REPORT.md was written, and the model card shows "
+            "REPORT.md, not the newer results. To publish those, run evaluate.py --compare, then --push-only."
         )
     split = results_split(cfg, results)
     if split != "test":
@@ -236,6 +253,7 @@ def push_to_hub(cfg: dict[str, Any], gguf: Path) -> dict[str, str]:  # pragma: n
     from huggingface_hub import HfApi
 
     repo, token = push_settings(cfg)
+    check_report(cfg)
     if not gguf.is_file() or not adapter_dir(cfg).is_dir():
         raise FileNotFoundError(f"Nothing to upload: export first (missing {gguf} or {adapter_dir(cfg)}).")
     api = HfApi(token=token)
@@ -270,6 +288,7 @@ def main(argv: list[str] | None = None) -> dict[str, str]:  # pragma: no cover -
         from huggingface_hub import HfApi
 
         repo, token = push_settings(cfg)  # before the slow export: a missing setting fails in seconds
+        check_report(cfg)
         create_hub_repos(HfApi(token=token), repo)
         for warning in push_warnings(cfg):
             print(warning)
@@ -277,6 +296,8 @@ def main(argv: list[str] | None = None) -> dict[str, str]:  # pragma: no cover -
     outputs = {"adapter": str(adapter_dir(cfg)), "gguf": str(gguf)}
     if args.push or args.push_only:
         outputs.update(push_to_hub(cfg, gguf))
+        for warning in push_warnings(cfg):  # again: the export's output has scrolled them away
+            print(warning)
     return outputs
 
 

@@ -29,6 +29,8 @@ import judge as judge_mod
 import metrics
 from common import (
     REPORT_INFO_FILE,
+    adapter_digest,
+    adapter_path,
     build_prompt_messages,
     file_digest,
     load_config,
@@ -79,7 +81,7 @@ def load_for_inference(cfg: dict[str, Any], which: str, backend: str, adapter_di
     """Load the base model, or the base model plus the trained LoRA adapter."""
     if which not in ("base", "tuned"):
         raise ValueError(f"--model must be 'base' or 'tuned', got {which!r}")
-    adapter = adapter_dir or str(Path(cfg["train"]["output_dir"]) / "final_adapter")
+    adapter = str(adapter_path(cfg, adapter_dir))
     if which == "tuned" and not Path(adapter).exists():
         raise FileNotFoundError(f"No adapter at {adapter}. Run step 3 first: python src/train.py --config ...")
     if backend == "unsloth":  # pragma: no cover - needs a CUDA GPU
@@ -316,8 +318,13 @@ def evaluate_model(
 ) -> dict[str, Any]:
     """Generate, score and save one model's results."""
     set_seed(cfg["seed"])
+    # Which adapter these numbers describe. Training again overwrites it in the same folder,
+    # so export.py compares this hash with the adapter it is about to upload.
+    adapter = adapter_digest(adapter_path(cfg, adapter_dir)) if which == "tuned" else None
     gen = generate_all(cfg, which, backend, adapter_dir)
     scored = score(cfg, which, gen)
+    if adapter:
+        scored.report["adapter_digest"] = adapter
     # Save before the optional judge runs: generation is the slow GPU part, so a judge
     # problem (network, quota, an unexpected error) must never cost us the replies.
     save_results(cfg, which, scored.report, prediction_rows(gen, scored, []))
@@ -402,14 +409,51 @@ def same_judge(base: dict[str, Any], tuned: dict[str, Any]) -> bool:
 
 
 def judge_note(base: dict[str, Any], tuned: dict[str, Any]) -> str | None:
-    """Why the judge scores are missing from the report when both runs were judged differently."""
-    b_used, t_used = judge_used(base), judge_used(tuned)
-    if b_used is None or t_used is None or b_used == t_used:
+    """Why LLM judge rows or the out-of-scope judge gate are missing from the report, and which
+    replies the judge could not grade. None when there is nothing to say."""
+    runs = {"base": base, "fine-tuned": tuned}
+    used = {name: judge_used(run) for name, run in runs.items()}
+    graded = [name for name in runs if used[name]]
+    if not graded:
         return None
-    return (
-        f"The LLM judge scores are not compared: the base model was graded by {b_used} and the "
-        f"fine-tuned model by {t_used}. Evaluate both with the same eval.judge settings to compare them."
-    )
+    if len(graded) == 1:
+        other = "fine-tuned" if graded == ["base"] else "base"
+        return (
+            f"The LLM judge scores are not compared: only the {graded[0]} model was graded by the judge. "
+            f"Evaluate the {other} model with the judge too (it runs when ANTHROPIC_API_KEY is set) to compare them."
+        )
+    if used["base"] != used["fine-tuned"]:
+        older = [name for name, run in runs.items() if "effort" not in run["judge"]]
+        advice = (
+            f"The {older[0]} model's results do not record the judge's effort: evaluate that model again."
+            if len(older) == 1
+            else "Evaluate both with the same eval.judge settings to compare them."
+        )
+        return (
+            f"The LLM judge scores are not compared: the base model was graded by {used['base']} and the "
+            f"fine-tuned model by {used['fine-tuned']}. {advice}"
+        )
+    return judge_gaps(runs)
+
+
+def judge_gaps(runs: dict[str, dict[str, Any]]) -> str | None:
+    """The replies the judge could not grade (API or network errors that outlived the retries).
+
+    Its scores leave them out. With no verdict at all on a run's out-of-scope replies, the
+    out-of-scope judge gate cannot be applied, and the report must say so.
+    """
+    notes = []
+    for name, run in runs.items():
+        errors = int(run["judge"].get("errors", 0))
+        if errors:
+            total = run["metrics"]["n"] + run["out_of_scope"]["n"]
+            no_gate = judge_score(run, "out_of_scope", "judge_acceptable_rate") is None
+            result = "so the out-of-scope judge gate was not applied" if no_gate else "and its scores leave them out"
+            notes.append(
+                f"The judge could not grade {errors} of the {name} model's {total} replies, {result}. "
+                f"Evaluate the {name} model again to grade them."
+            )
+    return " ".join(notes) or None
 
 
 # (label, section of the metrics report, key), in the order the report shows them.
@@ -473,9 +517,10 @@ def check_comparable(base: dict[str, Any], tuned: dict[str, Any]) -> None:
 def compare(cfg: dict[str, Any]) -> int:
     """Write results/REPORT.md and return the process exit code (0 pass, 3 retrain).
 
-    Next to the report it writes report.json: the split the report is on and a digest of
-    each metrics file it was built from. export.py uses it to label the model card and to
-    warn when a newer evaluation was never compared.
+    Next to the report it writes report.json: the split the report is on, a digest of each
+    metrics file it was built from and of the adapter the fine-tuned model's numbers describe.
+    export.py uses it to label the model card, to warn when a newer evaluation was never
+    compared, and to refuse to publish an adapter that was trained again after the report.
     """
     out = Path(cfg["eval"]["results_dir"])
     base = json.loads((out / "base_metrics.json").read_text(encoding="utf-8"))
@@ -499,7 +544,7 @@ def compare(cfg: dict[str, Any]) -> int:
     lines.append(f"**Quality gates: {verdict}**")
     lines += [f"- {f}" for f in failures]
     (out / "REPORT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    info = {"split": tuned.get("split", "test")}
+    info = {"split": tuned.get("split", "test"), "adapter_digest": tuned.get("adapter_digest")}
     info.update({name: file_digest(out / f"{name}.json") for name in ("base_metrics", "tuned_metrics")})
     write_json(out / REPORT_INFO_FILE, info)
     print("\n".join(lines))
