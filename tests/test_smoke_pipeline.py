@@ -21,9 +21,10 @@ pytest.importorskip("peft")
 pytest.importorskip("triton", reason="TRL's training loss needs Triton, which only has Linux wheels")
 
 import evaluate
+import export
 import prepare_data
 import train
-from common import SYSTEM_PROMPT
+from common import SYSTEM_PROMPT, adapter_digest, load_config
 from tests.tiny_model import build_tiny_model
 
 pytestmark = pytest.mark.slow
@@ -98,12 +99,16 @@ def test_full_pipeline(workspace: dict[str, Path]) -> None:
     assert evaluate.main(["--config", cfg, "--model", "tuned", "--no-judge"]) == 0
     tuned = json.loads((root / "results" / "tuned_metrics.json").read_text(encoding="utf-8"))
     assert tuned["metrics"]["n"] == 4
+    assert tuned["adapter_digest"] == adapter_digest(adapter)  # which adapter these numbers describe
     preds = (root / "results" / "tuned_predictions.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(preds) == 4 + 24  # test examples + out-of-scope prompts
 
     code = evaluate.main(["--config", cfg, "--compare"])
     assert code in (0, evaluate.EXIT_GATES_FAILED)  # a random tiny model may fail the gates
     assert "Quality gates" in (root / "results" / "REPORT.md").read_text(encoding="utf-8")
+    # Checked on real files: REPORT.md is up to date and describes the adapter --push would upload.
+    export.check_report(load_config(cfg))
+    assert export.push_warnings(load_config(cfg)) == []
 
 
 def test_loss_is_computed_on_the_answer_only(workspace: dict[str, Path]) -> None:

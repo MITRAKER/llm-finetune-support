@@ -7,6 +7,7 @@ on top of these.
 
 from __future__ import annotations
 
+import bisect
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -38,23 +39,20 @@ def strip_reasoning(text: str) -> str:
 # details the customer wrote in their own message may be repeated.
 DETAIL_PATTERNS: dict[str, re.Pattern[str]] = {
     "email": re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b"),
-    # A URL ends before brackets and quotes, so a link in parentheses or in Markdown,
-    # such as [track it](https://shop.example.com/track), does not keep the ")".
+    # A URL ends before brackets, quotes and Markdown bold, so a link written as
+    # [track it](https://shop.example.com/track), **https://...** or “https://...” keeps none of them.
     "url": re.compile(
-        r"\b(?:https?://|www\.)[^\s<>()\[\]{}\"'`]+"
+        r"\b(?:https?://|www\.)[^\s<>()\[\]{}\"'`*“”‘’«»…]+"
         r"|\b[\w-]+\.(?:com|net|org|io|co|shop|store|info|biz|us|uk|ca|au|de|fr|eu|app)\b",
         re.IGNORECASE,
     ),
-    # Phone numbers: 1-800-555-0199, +44 20 7946 0958, (555) 123-4567, (555)123-4567,
-    # +1 555 0100, and 555-1234 or 555 1234 after a word such as "call". A bare short
-    # number looks like a range ("100-1000 units", "open 900-1700"), so it needs that word.
+    # Phone numbers: 1-800-555-0199, +44 20 7946 0958, (555) 123-4567, (555)123-4567 and
+    # +1 555 0100. Short numbers such as 555-0199 are found by _phone_numbers() below.
     # Dates are masked first, so 12.05.2024 is not a phone number.
     "phone": re.compile(
         r"(?<![\w])(?:\+?\d{1,3}[\s.-]+)?(?:\(?\d{2,4}\)?[\s.-]+){2,}\d{3,4}(?![\w])"
         r"|(?<![\w])\+\d{1,3}(?:[\s.-]\d{2,4}){2,}(?![\w])"
         r"|\(\d{3}\)\d{3}[\s.-]?\d{4}(?![\w])"
-        r"|(?i:\b(?:call|phone|telephone|tel|dial|text|sms|fax|hotline|helpline|line|number|contact|reach)\b)"
-        r"\D{0,20}?(?<![\w.-])(?P<detail>\d{3}[\s.-]\d{4})(?![\w-]|[\s.-]\d)"
     ),
     # Order / tracking numbers: 5+ digits in a row, optionally after "#".
     "long_number": re.compile(r"(?<![\w])#?\d{5,}(?![\w])"),
@@ -65,20 +63,44 @@ DETAIL_PATTERNS: dict[str, re.Pattern[str]] = {
         r"[$€£]\s?\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s?(?:USD|EUR|GBP|dollars|euros)\b", re.IGNORECASE
     ),
 }
+# A short number such as 555-0199 or 555 0199 is a phone number only when a word such as
+# "call", "phone" or "contact" comes before it in the same sentence: on its own it is as often
+# a range ("orders of 100-1000"). Even then, a range of round hundreds ("our lines are open
+# 900-1700") or a number followed by a unit on the same line ("250-5000 units") is not one.
+PHONE_CUE_RE = re.compile(
+    r"\b(?:call\w*|phon\w*|tel|telephone|dial\w*|text\w*|sms|fax|hotlines?|helplines?|lines?|numbers?"
+    r"|contact\w*|reach\w*|mobile|cell|whatsapp|ring)\b",
+    re.IGNORECASE,
+)
+SHORT_PHONE_RE = re.compile(
+    r"(?<![\w.$€£-])(?!\d00[\s.-]\d\d00(?!\d))\d{3}[\s.-]\d{4}(?![\w-]|[ \t.-]\d)"
+    r"(?![ \t]*(?:units?|items?|pieces?|pcs|products?|orders?|people|hours?|hrs|minutes?|mins|days?|weeks?)\b)"
+)
+# A sentence ends at . ! ? followed by a capital letter ("tel. 555 0199" goes on), or at a line
+# break, unless the line ends with a colon: a label such as "**Phone:**" goes on to the next line.
+SENTENCE_END_RE = re.compile(r"[.!?]\s+(?=[A-Z])|(?<![:*_\s])[*_ \t\r]*\n\s*")
 # Dates such as 12.05.2024, 12/05/24 or 2024-05-12 look like digit groups but are not invented details.
 DATE_RE = re.compile(r"(?<![\w.-])(?:\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2})(?![\w-]|\.\d)")
 NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
-# A bare number in the customer's message is an amount only next to a money word,
-# as in "I was charged 49.99 twice"; "order 100 is missing" does not excuse "$100".
+# A bare number in the customer's message counts as an amount only next to a money word, as in
+# "I was charged 50 twice", "my payment of 1,299" or "50 dollars": "order 100 is missing" and
+# "invoice 100 is wrong" do not excuse "$100". (A number with two decimals, such as 49.99, is
+# taken as an amount wherever the customer wrote it.)
 MONEY_CUE_RE = re.compile(
-    r"[$€£]|\b(?:charged?|refund\w*|paid|pay|price\w*|costs?|fees?|total|amount|spent|bill\w*"
-    r"|usd|eur|gbp|dollars?|euros?|pounds?)\b",
+    r"[$€£]|\b(?:charg(?:e[sd]?|ing)|pa(?:id|ys?|ying|yments?)|refund\w*|pric(?:e[sd]?|ing)|cost(?:s|ing)?"
+    r"|fees?|totals?|amounts?|spent|bill\w*|bought|usd|eur|gbp|dollars?|euros?|pounds?)\b",
     re.IGNORECASE,
 )
-MONEY_CUE_WINDOW = 12  # characters looked at on each side of the number
+MONEY_CUE_GAP = 12  # at most this many characters between the money word and the number
+# A number right after one of these words is an id, even next to a money word: in "will I be
+# refunded for order 88231?", 88231 is the order, not an amount.
+ID_BEFORE_RE = re.compile(
+    r"(?:#|\b(?:order|invoice|ticket|tracking|account|reference|ref|item|number|no\.)\s*#?)\s*$", re.IGNORECASE
+)
 
 
 def _without_placeholders(text: str) -> str:
+    """Placeholders become a space, so that one cannot join the text around it into an email or a link."""
     return PLACEHOLDER_RE.sub(" ", text)
 
 
@@ -87,10 +109,37 @@ def _searchable(text: str) -> str:
     return DATE_RE.sub(" ", _without_placeholders(text))
 
 
-def _detail(match: re.Match[str]) -> str:
-    """The detail a pattern found, without the word ("call") that some patterns need before it."""
-    detail = match.group("detail") if "detail" in match.re.groupindex else None
-    return (detail or match.group(0)).strip()
+def _any_between(positions: list[int], low: int, high: int) -> bool:
+    """Whether a sorted list of positions holds one from low to high."""
+    i = bisect.bisect_left(positions, low)
+    return i < len(positions) and positions[i] <= high
+
+
+def _phone_numbers(text: str) -> list[str]:
+    """The phone numbers in a text, in order: every match of DETAIL_PATTERNS["phone"], plus the
+    short numbers that follow a word such as "call" in their sentence. A short number inside a
+    longer match, such as 123-4567 in (555) 123-4567, is not counted again."""
+    full = list(DETAIL_PATTERNS["phone"].finditer(text))
+    full_starts = [m.start() for m in full]
+    cue_ends = [m.end() for m in PHONE_CUE_RE.finditer(text)]
+    sentence_starts = [0, *(m.end() for m in SENTENCE_END_RE.finditer(text))]
+    short = []
+    for number in SHORT_PHONE_RE.finditer(text):
+        at = number.start()
+        sentence_start = sentence_starts[bisect.bisect_right(sentence_starts, at) - 1]
+        before = bisect.bisect_right(full_starts, at) - 1  # the last longer match that starts at or before it
+        inside_full = before >= 0 and at < full[before].end()
+        if _any_between(cue_ends, sentence_start, at) and not inside_full:
+            short.append(number)
+    return [m.group(0) for m in sorted(full + short, key=lambda m: m.start())]
+
+
+def _find_details(text: str) -> dict[str, list[str]]:
+    """The details in a text, by kind (placeholders and dates already removed)."""
+    return {
+        kind: _phone_numbers(text) if kind == "phone" else [m.group(0) for m in pattern.finditer(text)]
+        for kind, pattern in DETAIL_PATTERNS.items()
+    }
 
 
 def _canon(kind: str, item: str) -> str:
@@ -101,32 +150,45 @@ def _canon(kind: str, item: str) -> str:
         number = NUMBER_RE.search(item)
         return f"{float(number.group(0).replace(',', '')):.2f}" if number else ""
     if kind == "url":
-        return re.sub(r"^(?:https?://)?(?:www\.)?", "", item.lower()).rstrip("/.,;:!?")
+        return re.sub(r"^(?:https?://)?(?:www\.)?", "", item.lower()).rstrip("/.,;:!?_~")
     return item.lower()
 
 
 def _same_phone(a: str, b: str) -> bool:
     """Two phone numbers (digits only) that differ at most in the country code or the leading 0:
-    +1 555 123 4567 is 555 123 4567, and +44 20 7946 0958 is 020 7946 0958."""
+    +1 555 123 4567 is 555 123 4567, and +44 20 7946 0958 is 020 7946 0958. The shorter one must
+    be a whole national number (8 digits or more) and the longer one may add at most 3 digits,
+    so neither (212) 555-0199 nor 1-800-123-4567 is the customer's 555-0199 or order 1234567.
+    (Numbers that follow +1 or +44 have 9 or 10 digits, so a 7-digit number that gains digits
+    is an invented prefix, not a country code.) A known limit: from the digits alone, a
+    country code cannot be told from any other prefix of up to 3 digits."""
     shorter, longer = sorted((a.lstrip("0"), b.lstrip("0")), key=len)
-    return len(shorter) >= 7 and longer.endswith(shorter)
+    return len(shorter) >= 8 and len(longer) - len(shorter) <= 3 and longer.endswith(shorter)
 
 
 def _given_amounts(text: str) -> set[str]:
-    """Money normal forms of the bare numbers the customer wrote next to a money word."""
-    amounts = set()
-    for number in NUMBER_RE.finditer(text):
-        around = text[max(0, number.start() - MONEY_CUE_WINDOW) : number.end() + MONEY_CUE_WINDOW]
-        if MONEY_CUE_RE.search(around):
-            amounts.add(_canon("money", number.group(0)))
-    return amounts
+    """Money normal forms of the bare numbers the customer wrote next to a money word (ids excepted)."""
+    cues = list(MONEY_CUE_RE.finditer(text))
+    cue_ends, cue_starts = [c.end() for c in cues], [c.start() for c in cues]
+    return {
+        _canon("money", number.group(0))
+        for number in NUMBER_RE.finditer(text)
+        if (
+            _any_between(cue_ends, number.start() - MONEY_CUE_GAP, number.start())
+            or _any_between(cue_starts, number.end(), number.end() + MONEY_CUE_GAP)
+        )
+        and not ID_BEFORE_RE.search(text[max(0, number.start() - 20) : number.start()])
+    }
 
 
 def _given_details(user_message: str) -> set[str]:
-    """Normal forms of the details the customer wrote. Matching is exact, never by substring:
-    the customer's order 88231 does not excuse an invented refund of $88."""
+    """Normal forms of the details the customer wrote. A detail must match a whole one, never a
+    part: the customer's order 88231 does not excuse an invented refund of $88. The one exception
+    is a phone number's country code (see _same_phone)."""
     text = _searchable(user_message)
-    given = {_canon(kind, _detail(m)) for kind, pattern in DETAIL_PATTERNS.items() for m in pattern.finditer(text)}
+    given = {_canon(kind, hit) for kind, hits in _find_details(text).items() for hit in hits}
+    # The customer's own short numbers need no word such as "call": "it's 555-0199 now".
+    given.update(_canon("phone", m.group(0)) for m in SHORT_PHONE_RE.finditer(text))
     given.update(_canon("long_number", number) for number in NUMBER_RE.findall(text))
     given.update(_given_amounts(text))
     given.update(re.findall(r"[\w@.+-]+", text.lower()))
@@ -142,14 +204,12 @@ def _was_given(kind: str, canon: str, given: set[str]) -> bool:
 
 def invented_details(response: str, user_message: str = "") -> dict[str, list[str]]:
     """Concrete details in the response that the customer did not provide."""
-    text = _searchable(response)
     given = _given_details(user_message)
     found: dict[str, list[str]] = {}
-    for kind, pattern in DETAIL_PATTERNS.items():
-        hits = [_detail(m) for m in pattern.finditer(text)]
-        hits = [h for h in hits if _canon(kind, h) and not _was_given(kind, _canon(kind, h), given)]
-        if hits:
-            found[kind] = hits
+    for kind, hits in _find_details(_searchable(response)).items():
+        invented = [h for h in hits if _canon(kind, h) and not _was_given(kind, _canon(kind, h), given)]
+        if invented:
+            found[kind] = invented
     return found
 
 

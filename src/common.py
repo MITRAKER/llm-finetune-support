@@ -8,6 +8,7 @@ reasons a fine-tuned model looks worse in production than in evaluation.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -33,6 +34,12 @@ SYSTEM_PROMPT = (
 
 # Matches placeholders such as {{Order Number}} in the dataset's responses.
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+
+# evaluate.py --compare writes results/REPORT.md and, next to it, this record of what the
+# report was built from. export.py reads it to label the model card, to spot a report that
+# is older than the latest evaluation, and to refuse to publish an adapter the report does
+# not describe.
+REPORT_INFO_FILE = "report.json"
 
 
 def load_config(path: str | os.PathLike) -> dict[str, Any]:
@@ -74,6 +81,29 @@ def write_json(path: str | os.PathLike, obj: Any) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)
         f.write("\n")
+
+
+def file_digest(path: str | os.PathLike) -> str:
+    """A short hash of a file's bytes: it changes whenever the file does."""
+    with open(path, "rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()[:16]
+
+
+def adapter_path(cfg: dict[str, Any], folder: str | os.PathLike | None = None) -> Path:
+    """The LoRA adapter folder: the one given (evaluate.py --adapter), or the one step 3 saves."""
+    return Path(folder) if folder else Path(cfg["train"]["output_dir"]) / "final_adapter"
+
+
+def adapter_digest(folder: str | os.PathLike) -> str | None:
+    """A short hash of a LoRA adapter's weights, or None when the folder has none.
+
+    Training again overwrites the adapter in the same folder, so the hash, not the
+    folder name, tells which adapter a set of results describes.
+    """
+    for name in ("adapter_model.safetensors", "adapter_model.bin"):
+        if (Path(folder) / name).is_file():
+            return file_digest(Path(folder) / name)
+    return None
 
 
 def set_seed(seed: int) -> None:
