@@ -3,7 +3,7 @@
 # Exact versions = the versions CI tests. Dependabot proposes upgrades as pull requests.
 anthropic==2.12.0
 pandas==3.1.1
-pydantic==2.14.3
+pydantic==2.14.4
 PyYAML==6.0.4
 rouge-score==0.1.2
 scikit-learn==1.9.1
