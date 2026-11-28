@@ -77,9 +77,12 @@ Versions follow [Semantic Versioning](https://semver.org/). To release:
    example `## [0.2.0] - 2026-12-01`.
 2. Set the same version in `pyproject.toml` (and `CITATION.cff`), and merge.
 3. Tag the merge commit and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
+   Without git, open the **Actions** tab, choose **Release**, then **Run workflow** on
+   `main` with the tag, for example `v0.2.0`: the workflow creates the tag itself.
 
 The release workflow checks that the tag matches `pyproject.toml` and publishes a
-GitHub release with the notes from the changelog.
+GitHub release with the notes from the changelog. When it is run by hand, it makes
+that check before it creates the tag.
 
 ## Dependencies
 

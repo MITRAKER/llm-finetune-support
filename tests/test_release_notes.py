@@ -44,6 +44,9 @@ def test_tag_must_match_pyproject(tmp_path: Path):
     assert "Something new" in release_notes.release_notes("v0.2.0", repo)
     with pytest.raises(ValueError, match="does not match"):
         release_notes.release_notes("v0.1.0", repo)
+    # A tag typed into a manual run of the release workflow must keep the v prefix.
+    with pytest.raises(ValueError, match=re.escape("it must be v0.2.0")):
+        release_notes.release_notes("0.2.0", repo)
 
 
 def test_main_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]):

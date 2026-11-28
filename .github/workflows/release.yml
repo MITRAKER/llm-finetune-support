@@ -1,10 +1,19 @@
 # Release: pushing a tag such as v0.2.0 creates a GitHub release whose notes are
 # the matching section of CHANGELOG.md. The tag must match pyproject.toml.
+# Without git, start it from the Actions tab instead (Release > Run workflow, on
+# main, with the tag to create): it runs the same checks, then creates the tag on
+# main's latest commit and publishes the release.
 name: Release
 
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to create on main and release, such as v0.2.0"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -14,18 +23,31 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write # create the release
+      contents: write # create the tag (manual runs) and the release
+    env:
+      # A pushed tag names itself; a manual run takes the tag from its input. Steps
+      # read it as "$TAG", so the input is never pasted into a script.
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
+      - name: Release only main (manual runs)
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Run the release on main, not on $GITHUB_REF_NAME."
+          exit 1
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Check the tag matches the project version and extract the notes
-        env:
-          TAG: ${{ github.ref_name }}
         run: python tools/release_notes.py "$TAG" > release-notes.md
+      - name: Create the tag on this commit (manual runs)
+        # Made through the API with the workflow's own token: it needs no git credentials,
+        # fails if the tag already exists, and does not start this workflow again.
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" --silent
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: gh release create "$TAG" --title "$TAG" --notes-file release-notes.md --verify-tag
