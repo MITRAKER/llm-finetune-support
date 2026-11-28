@@ -15,4 +15,4 @@ transformers==5.17.0
 trl==1.15.0
 unsloth==2026.11.5
 unsloth-zoo==2026.11.5
-wandb==0.31.0
+wandb==0.31.2
