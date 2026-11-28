@@ -7,7 +7,7 @@ pipeline is used, MINOR for new features, PATCH for fixes.
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-11-24
+## [0.1.0] - 2026-11-28
 
 ### Added
 
@@ -46,6 +46,7 @@ pipeline is used, MINOR for new features, PATCH for fixes.
 - CodeQL scanning, Dependabot (it leaves the GPU stack that Unsloth caps to manual
   upgrades), pre-commit hooks (including secret scanning), issue and pull request
   templates, a release workflow that checks the tag against `pyproject.toml`,
-  `CHANGELOG.md` and `CITATION.cff`, and continuous deployment of the demo (after CI
-  on `main`, or by hand on `main` only).
+  `CHANGELOG.md` and `CITATION.cff` (on a pushed tag, or by hand on `main`, where it
+  creates the tag), and continuous deployment of the demo (after CI on `main`, or by
+  hand on `main` only).
 - LEARNING.md: a step-by-step lesson for every part of the project.

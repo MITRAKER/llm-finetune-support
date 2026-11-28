@@ -1,9 +1,10 @@
 """Print the release notes for one version from CHANGELOG.md.
 
-Used by .github/workflows/release.yml when a tag such as v0.2.0 is pushed. It
-also refuses to continue if the tag does not match the version in
-pyproject.toml, or if CITATION.cff names another version or release date than
-CHANGELOG.md, so a release can never carry the wrong number.
+Used by .github/workflows/release.yml when a tag such as v0.2.0 is pushed, and
+before the workflow creates the tag when it is run by hand. It also refuses to
+continue if the tag is not "v" followed by the version in pyproject.toml, or if
+CITATION.cff names another version or release date than CHANGELOG.md, so a
+release can never carry the wrong number.
 
 Usage:
     python tools/release_notes.py v0.2.0 > release-notes.md
@@ -72,10 +73,9 @@ def check_citation(citation: str, version: str, date: str | None) -> None:
 
 
 def release_notes(tag: str, root: Path = ROOT) -> str:
-    version = tag.removeprefix("v")
-    expected = project_version(root / "pyproject.toml")
-    if version != expected:
-        raise ValueError(f"tag {tag} does not match the version in pyproject.toml ({expected})")
+    version = project_version(root / "pyproject.toml")
+    if tag != f"v{version}":
+        raise ValueError(f"tag {tag} does not match the version in pyproject.toml: it must be v{version}")
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     citation = root / "CITATION.cff"
     if citation.exists():

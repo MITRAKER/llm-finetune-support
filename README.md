@@ -177,7 +177,7 @@ and fills placeholders from the store's own details.
 | Zero warnings | Any warning fails the tests; ruff and mypy must report nothing |
 | Security | CodeQL, pip-audit, ruff's bandit rules, gitleaks in pre-commit, least-privilege workflow permissions, secrets only in secret stores |
 | Dependencies | Pinned in `requirements/` and audited with pip-audit; Dependabot pull requests must pass CI, and those that touch the GPU stack also need a quick-test run on Kaggle |
-| Releases | Semantic versioning, [CHANGELOG.md](CHANGELOG.md), and a tag such as `v0.1.0` publishes a GitHub release ([release.yml](.github/workflows/release.yml)) |
+| Releases | Semantic versioning, [CHANGELOG.md](CHANGELOG.md), and a tag such as `v0.1.0` publishes a GitHub release; without git, the same workflow creates the tag when run by hand ([release.yml](.github/workflows/release.yml)) |
 | Continuous deployment | After CI passes on `main`, the demo is published to the Hugging Face Space ([deploy-space.yml](.github/workflows/deploy-space.yml)) |
 | Reproducibility | One config per experiment, fixed seeds, pinned versions, and the library versions and git commit saved next to every trained adapter |
 

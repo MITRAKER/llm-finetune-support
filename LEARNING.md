@@ -641,7 +641,7 @@ YAML files under `.github/workflows/`:
 |---|---|---|
 | `ci.yml` | every push to `main` and every pull request | lint, format, types, Power of Ten checker and the other pre-commit hooks; unit tests on Python 3.11, 3.12 and 3.13; the CPU smoke test with an 85% coverage gate; pip-audit of every requirements file |
 | `codeql.yml` | pull requests, `main`, weekly | GitHub's security analysis of the Python code and of the workflows themselves |
-| `release.yml` | a pushed tag such as `v0.1.0` | checks the tag matches `pyproject.toml`, publishes a GitHub release with the changelog notes |
+| `release.yml` | a pushed tag such as `v0.1.0`, or by hand on `main` | checks the tag matches `pyproject.toml`, creates the tag when run by hand, publishes a GitHub release with the changelog notes |
 | `deploy-space.yml` | after CI passes on `main`, or by hand on `main` | publishes the demo to the Hugging Face Space |
 
 Good habits visible in these files: `permissions: contents: read` by default (least
@@ -716,8 +716,9 @@ pull request, so a change made without `pre-commit install` is still checked.
 PATCH for fixes, MINOR for new features, MAJOR for breaking changes. `CHANGELOG.md`
 lists changes in plain language under each version ("Keep a Changelog" format).
 Releasing means moving the "Unreleased" notes under a version, setting the same
-version in `pyproject.toml`, and pushing a tag; the release workflow does the rest
-and refuses a tag that does not match.
+version in `pyproject.toml`, and pushing a tag (or running the release workflow by
+hand from the Actions tab, which creates the tag); the release workflow does the
+rest and refuses a tag that does not match.
 
 ### The NASA/JPL "Power of Ten" rules
 
